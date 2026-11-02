@@ -62,7 +62,7 @@ function load(){
   const old=JSON.parse(raw);
   if(!Array.isArray(old.words)||!old.words.length)return fresh;
   const result=structuredCloneSafe(old.words);
-  const key=s=>String(s||'').trim().toLowerCase().replace(/\\s+/g,' ');
+  const key=s=>String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
   const seen=new Set(result.map(w=>key(w.term)));
   let added=0;
   for(const w of CORE_WORDS){
