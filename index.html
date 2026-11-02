@@ -71,44 +71,91 @@ function library(){return `${statHtml()}<section class="panel"><div class="eyebr
 const AI_PROMPT = `あなたはUSCPA（FAR・REG・AUD・TCP）試験の専門英語講師です。添付する写真に掲載された英単語・熟語を掲載順に、漏れなく抽出してください。\n\n・写真にない単語は追加しない。会計上の複合語は1語として扱う。\n・日本語訳はUSCPAの会計・監査・税務の意味を優先する。\n・写真が日本語訳を掲載していればその訳を参考にし、なければ正確な訳を付ける。\n・判読不能な文字を推測で補完しない。判読不能な項目は出力に含めない。\n・英単語の重複は1回だけにする。\n・noteは簡潔なUSCPAでの意味、exampleは自然で短い試験用英文、translationは例文の日本語訳。\n・出力はJSONのみ。見出し・挨拶・Markdownのコード囲みを付けない。\n\n次の形式を厳守してください。\n{\n  "words": [\n    {"term":"accounts payable","ja":"買掛金","note":"仕入等による営業債務","example":"Accounts payable increased.","translation":"買掛金が増加した。","section":"追加した単語"}\n  ]\n}\n\n写真中の用語だけを出力してください。例示したaccounts payableを写真にないのに含めないでください。1回につき最大100語まで。`; 
 function aiImportPanel(){return `<section class="panel" id="ai-panel"><div class="eyebrow">AI PHOTO IMPORT · NEW</div><div class="title-row"><h2>写真からまとめて単語追加</h2><span class="tag">無料</span></div><div class="ai-hero"><div style="font-size:13px;font-weight:800;color:#263e69">写真を読み取ったAIの結果を、そのまま一括登録</div><div class="ai-steps"><div class="ai-step"><b>① 📷</b>ChatGPTに<br>写真を送る</div><div class="ai-step"><b>② ✨</b>指定形式で<br>AIが抽出</div><div class="ai-step"><b>③ ✓</b>貼り付けて<br>まとめて登録</div></div><div class="ai-tools"><button type="button" class="btn primary full" id="ai-copy">① 読み取り指示をコピー</button><a class="btn secondary full" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">② ChatGPTを開く ↗</a></div><p class="subtitle" style="margin-top:10px">指示をコピー → ChatGPTで写真と一緒に送る → 返ってきたJSONをコピー。アプリ内にAPIキーは不要です。</p></div><div style="margin-top:17px" class="fieldgroup"><label for="ai-paste" class="field-label">③ AIの抽出結果をここに貼り付け</label><textarea id="ai-paste" class="field ai-textarea" rows="6" placeholder='{"words":[{"term":"depreciation","ja":"減価償却","note":"固定資産の取得原価の配分"}]}' spellcheck="false">${esc(aiDraft)}</textarea></div><div class="btnrow"><button type="button" class="btn primary" id="ai-parse">④ 読み込み・重複チェック</button><button type="button" class="btn outline" id="ai-file-btn">JSON / CSV を選ぶ</button><input id="ai-file" type="file" accept=".json,.txt,.tsv,.csv,application/json,text/plain,text/csv,text/tab-separated-values" style="display:none"></div><p class="subtitle" style="margin-top:9px">ファイルを読み込む方法でもOK。JSON・タブ区切り・CSVに対応します。コピー時に混ざった特殊文字や余分な改行記号も自動補正します。従来のバックアップ復元とは別機能です。</p><div id="ai-feedback"></div><div id="ai-preview">${aiPreviewHtml()}</div></section>`}
 function aiNormalize(raw){
- let text=String(raw||'').trim().replace(/^\uFEFF/,'');
- // ChatGPTの画面からコピーした際に混ざるHTML文字参照や行末の\を補正する。
- // 例: &#x20;（空白）、&quot;（二重引用符）、各行末のバックスラッシュ
+ let input=String(raw||'').replace(/^\uFEFF/,'').replace(/[\u200B-\u200D\u2060]/g,'').trim();
+ if(!input)throw Error('AIの抽出結果を貼り付けてください');
+ if(input.length>1500000)throw Error('データが大きすぎます。写真を分割してください');
  const htmlEntities={amp:'&',quot:'"',apos:"'",lt:'<',gt:'>',nbsp:' '};
- const decodeEntities=(s)=>s.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|quot|apos|lt|gt|nbsp);/gi,(match,key)=>{
-   if(key[0]==='#'){
-     const n=key[1]?.toLowerCase()==='x'?parseInt(key.slice(2),16):parseInt(key.slice(1),10);
-     return Number.isInteger(n)&&n>=0&&n<=0x10ffff?String.fromCodePoint(n):match;
-   }
-   return htmlEntities[key.toLowerCase()]??match;
+ const decodeEntities=s=>s.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|quot|apos|lt|gt|nbsp);/gi,(m,k)=>{
+  if(k[0]==='#'){const n=k[1]?.toLowerCase()==='x'?parseInt(k.slice(2),16):parseInt(k.slice(1),10);return Number.isInteger(n)&&n>=0&&n<=0x10ffff?String.fromCodePoint(n):m;}
+  return htmlEntities[k.toLowerCase()]??m;
  });
- // HTMLエンティティが二重にエスケープされている場合も対処
- text=decodeEntities(decodeEntities(text));
- // JSONの各行末に付いてしまった継続記号のみ取り除く（文字列中の通常の\は保持）
- text=text.replace(/\\[ \t]*(?=\r?\n)/g,'').trim();
-
- if(!text)throw Error('AIの抽出結果を貼り付けてください');
- if(text.length>1500000)throw Error('データが大きすぎます。写真を分割してください');
- const candidates=[text];
- const fenced=text.match(/```(?:json|tsv|csv|text)?\s*([\s\S]*?)```/i);
- if(fenced)candidates.unshift(fenced[1].trim());
- const firstObj=text.indexOf('{'), lastObj=text.lastIndexOf('}');
- if(firstObj!==-1&&lastObj>firstObj)candidates.push(text.slice(firstObj,lastObj+1));
- const firstArr=text.indexOf('['), lastArr=text.lastIndexOf(']');
- if(firstArr!==-1&&lastArr>firstArr)candidates.push(text.slice(firstArr,lastArr+1));
- for(const c of candidates){try{const obj=JSON.parse(c);if(obj?.app==='uscpa-wordlab'&&obj?.progress)throw Error('これは学習履歴バックアップです。追加用のAI抽出JSONを選んでください');let words=Array.isArray(obj)?obj:(obj?.words||obj?.terms||obj?.cards);if(Array.isArray(words))return words.map(aiConvert)}catch(e){if(e.message?.includes('学習履歴バックアップ'))throw e}}
- const lines=(fenced?fenced[1]:text).replace(/^```\w*\s*|```\s*$/g,'').trim().split(/\r?\n/).filter(x=>x.trim());
- const nonEmpty=lines.filter(l=>!/^\s*(?:#|\|\s*[-:| ]+\s*\|\s*$)/.test(l));
- if(!nonEmpty.length)throw Error('単語データがありません');
- const sep=nonEmpty[0].includes('\t')?'\t':(nonEmpty[0].includes('|')?'|':',');
- const parseDelimited=(t,delimiter)=>{const out=[];let row=[],value='',quote=false;for(let i=0;i<t.length;i++){const c=t[i];if(c==='"'){if(quote&&t[i+1]==='"'){value+='"';i++}else quote=!quote}else if(c===delimiter&&!quote){row.push(value);value=''}else if((c==='\n'||c==='\r')&&!quote){if(c==='\r'&&t[i+1]==='\n')i++;row.push(value);if(row.some(x=>x.trim()))out.push(row);row=[];value=''}else value+=c}row.push(value);if(row.some(x=>x.trim()))out.push(row);return out};
- const table=parseDelimited(nonEmpty.join('\n'),sep);
- const header=table[0]||[];
- if(header.length<2)throw Error('JSONまたは「英語、和訳」の表形式データを貼り付けてください');
- let offset=0;
- if(/^(term|english|word|英単語|英語)$/i.test(header[0].trim())&&/^(ja|japanese|meaning|日本語|日本語訳|和訳)$/i.test(header[1].trim()))offset=1;
- const arr=table.slice(offset).filter(r=>r.length>=2&&r[0].trim()&&r[1].trim()).map(r=>aiConvert({term:r[0],ja:r[1],note:r[2],example:r[3],translation:r[4],section:r[5]}));
- if(!arr.length)throw Error('読み取れる英単語と日本語訳がありません');return arr;
+ input=decodeEntities(decodeEntities(input)).replace(/\\[ \t]*(?=\r?\n)/g,'').trim();
+ const fence=input.match(/```(?:json|tsv|csv|text)?\s*([\s\S]*?)```/i);
+ const content=fence?fence[1].trim():input;
+ const variants=[content];
+ const start=content.indexOf('{'),end=content.lastIndexOf('}');
+ if(start>=0&&end>start)variants.push(content.slice(start,end+1));
+ const startArray=content.indexOf('['),endArray=content.lastIndexOf(']');
+ if(startArray>=0&&endArray>startArray)variants.push(content.slice(startArray,endArray+1));
+ if(/\\"(?:words|term|ja)\\"/.test(content))variants.push(content.replace(/\\"/g,'"'));
+ const canonical=variants.at(-1).includes('"term"')?variants.at(-1):content;
+ const expected=(canonical.match(/\{\s*"term"\s*:/g)||[]).length;
+ const structured=/^\s*[\[{]/.test(content)||/"(?:words|term|ja)"\s*:/.test(content)||/\\"(?:words|term|ja)\\"\s*:/.test(content);
+ for(const candidate of [...new Set(variants)]){
+  try{
+   const parsed=JSON.parse(candidate);
+   if(parsed?.app==='uscpa-wordlab'&&parsed?.progress)throw Error('これは学習履歴バックアップです。追加用のAI抽出JSONを選んでください');
+   const entries=Array.isArray(parsed)?parsed:(parsed?.words||parsed?.terms||parsed?.cards);
+   if(Array.isArray(entries)){
+    if(!entries.length)throw Error('単語データがありません');
+    if(expected&&entries.length<expected)continue;
+    return entries.map(aiConvert);
+   }
+  }catch(e){
+   if(e.message?.includes('学習履歴バックアップ')||e.message==='単語データがありません')throw e;
+  }
+ }
+ if(structured){
+  const recoverVariants=[content];
+  if(/\\"(?:words|term|ja)\\"/.test(content))recoverVariants.push(content.replace(/\\"/g,'"'));
+  for(const candidate of recoverVariants){
+   const starts=[...candidate.matchAll(/\{\s*"term"\s*:/g)].map(m=>m.index);
+   if(!starts.length)continue;
+   const entries=[];
+   for(const from of starts){
+    let depth=0,inQuote=false,escaped=false,to=-1;
+    for(let i=from;i<candidate.length;i++){
+     const ch=candidate[i];
+     if(inQuote){
+      if(escaped){escaped=false;continue}
+      if(ch==='\\'){escaped=true;continue}
+      if(ch==='"')inQuote=false;
+     }else{
+      if(ch==='"'){inQuote=true;continue}
+      if(ch==='{')depth++;
+      else if(ch==='}'&&--depth===0){to=i+1;break}
+     }
+    }
+    if(to<0)continue;
+    try{const w=JSON.parse(candidate.slice(from,to));if(w?.term&&w?.ja)entries.push(w)}catch(e){}
+   }
+   if(entries.length===starts.length&&entries.length>0){
+    return entries.map(aiConvert);
+   }
+  }
+  throw Error('JSONが途中で切れているか形式が崩れています。単語を一部だけ登録しないよう読み込みを停止しました。ChatGPTからJSONコードを再コピーしてください。');
+ }
+ const lines=content.split(/\r?\n/).filter(x=>x.trim()).filter(l=>! /^\s*(?:#|\|\s*[-:| ]+\s*\|\s*$)/.test(l));
+ if(!lines.length)throw Error('単語データがありません');
+ const delimiter=lines[0].includes('\t')?'\t':(lines[0].includes('|')?'|':',');
+ const csv=t=>{
+  let value='',row=[],quote=false,rows=[];
+  for(let i=0;i<t.length;i++){
+   const ch=t[i];
+   if(ch==='"'){if(quote&&t[i+1]==='"'){value+='"';i++}else quote=!quote}
+   else if(ch===delimiter&&!quote){row.push(value);value=''}
+   else if((ch==='\n'||ch==='\r')&&!quote){if(ch==='\r'&&t[i+1]==='\n')i++;row.push(value);if(row.some(x=>x.trim()))rows.push(row);row=[];value=''}
+   else value+=ch;
+  }
+  row.push(value);if(row.some(x=>x.trim()))rows.push(row);return rows;
+ };
+ const table=csv(lines.join('\n'));
+ const head=table[0]||[];
+ if(head.length<2)throw Error('JSONまたは「英語、和訳」の表形式データを貼り付けてください');
+ const offset=/^(term|english|word|英単語|英語)$/i.test(head[0].trim())&&/^(ja|japanese|meaning|日本語|日本語訳|和訳)$/i.test(head[1].trim())?1:0;
+ const rows=table.slice(offset).filter(r=>r.length>=2&&r[0].trim()&&r[1].trim()).map(r=>aiConvert({term:r[0],ja:r[1],note:r[2],example:r[3],translation:r[4],section:r[5]}));
+ if(!rows.length)throw Error('読み取れる英単語と日本語訳がありません');
+ return rows;
 }
 function aiConvert(w){if(typeof w==='string')return{term:w.trim(),ja:'',note:'',example:'',translation:'',section:'追加した単語',selected:true};const text=(...names)=>{for(const n of names){if(w?.[n]!==undefined&&w[n]!==null)return String(w[n]).trim()}return ''};const section=text('section','category','分類');return{term:text('term','en','english','word','front','英単語'),ja:text('ja','japanese','meaning','back','日本語訳'),note:text('note','explanation','description','補足'),example:text('example','sentence','英文例'),translation:text('translation','example_ja','例文訳'),section:['基本用語','勘定科目','会計処理','追加した単語'].includes(section)?section:'追加した単語',selected:true}}
 function aiMeta(){const seen=new Set();const existing=new Set(db.words.map(w=>norm(w.term)));let ready=0,dupes=0,invalid=0;const status=aiCandidates.map((w)=>{let d=norm(w.term),reason='';if(!d||!w.ja.trim()||w.term.length>120||w.ja.length>180)reason='要確認';else if(existing.has(d)||seen.has(d))reason='登録済み・重複';if(d&&reason!=='登録済み・重複')seen.add(d);if(reason==='登録済み・重複')dupes++;else if(reason)invalid++;else if(w.selected)ready++;return reason});return{status,ready,dupes,invalid}}
