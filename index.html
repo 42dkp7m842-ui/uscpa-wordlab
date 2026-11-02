@@ -72,6 +72,21 @@ const AI_PROMPT = `あなたはUSCPA（FAR・REG・AUD・TCP）試験の専門�
 function aiImportPanel(){return `<section class="panel" id="ai-panel"><div class="eyebrow">AI PHOTO IMPORT · NEW</div><div class="title-row"><h2>写真からまとめて単語追加</h2><span class="tag">無料</span></div><div class="ai-hero"><div style="font-size:13px;font-weight:800;color:#263e69">写真を読み取ったAIの結果を、そのまま一括登録</div><div class="ai-steps"><div class="ai-step"><b>① 📷</b>ChatGPTに<br>写真を送る</div><div class="ai-step"><b>② ✨</b>指定形式で<br>AIが抽出</div><div class="ai-step"><b>③ ✓</b>貼り付けて<br>まとめて登録</div></div><div class="ai-tools"><button type="button" class="btn primary full" id="ai-copy">① 読み取り指示をコピー</button><a class="btn secondary full" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">② ChatGPTを開く ↗</a></div><p class="subtitle" style="margin-top:10px">指示をコピー → ChatGPTで写真と一緒に送る → 返ってきたJSONをコピー。アプリ内にAPIキーは不要です。</p></div><div style="margin-top:17px" class="fieldgroup"><label for="ai-paste" class="field-label">③ AIの抽出結果をここに貼り付け</label><textarea id="ai-paste" class="field ai-textarea" rows="6" placeholder='{"words":[{"term":"depreciation","ja":"減価償却","note":"固定資産の取得原価の配分"}]}' spellcheck="false">${esc(aiDraft)}</textarea></div><div class="btnrow"><button type="button" class="btn primary" id="ai-parse">④ 読み込み・重複チェック</button><button type="button" class="btn outline" id="ai-file-btn">JSON / CSV を選ぶ</button><input id="ai-file" type="file" accept=".json,.txt,.tsv,.csv,application/json,text/plain,text/csv,text/tab-separated-values" style="display:none"></div><p class="subtitle" style="margin-top:9px">ファイルを読み込む方法でもOK。JSON・タブ区切り・CSVに対応します。従来のバックアップ復元とは別機能です。</p><div id="ai-feedback"></div><div id="ai-preview">${aiPreviewHtml()}</div></section>`}
 function aiNormalize(raw){
  let text=String(raw||'').trim().replace(/^\uFEFF/,'');
+ // ChatGPTの画面からコピーした際に混ざるHTML文字参照や行末の\を補正する。
+ // 例: &#x20;（空白）、&quot;（二重引用符）、各行末のバックスラッシュ
+ const htmlEntities={amp:'&',quot:'"',apos:"'",lt:'<',gt:'>',nbsp:' '};
+ const decodeEntities=(s)=>s.replace(/&(#x[0-9a-f]+|#[0-9]+|amp|quot|apos|lt|gt|nbsp);/gi,(match,key)=>{
+   if(key[0]==='#'){
+     const n=key[1]?.toLowerCase()==='x'?parseInt(key.slice(2),16):parseInt(key.slice(1),10);
+     return Number.isInteger(n)&&n>=0&&n<=0x10ffff?String.fromCodePoint(n):match;
+   }
+   return htmlEntities[key.toLowerCase()]??match;
+ });
+ // HTMLエンティティが二重にエスケープされている場合も対処
+ text=decodeEntities(decodeEntities(text));
+ // JSONの各行末に付いてしまった継続記号のみ取り除く（文字列中の通常の\は保持）
+ text=text.replace(/\\[ \t]*(?=\r?\n)/g,'').trim();
+
  if(!text)throw Error('AIの抽出結果を貼り付けてください');
  if(text.length>1500000)throw Error('データが大きすぎます。写真を分割してください');
  const candidates=[text];
