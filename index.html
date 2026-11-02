@@ -80,6 +80,26 @@ function aiNormalize(raw){
   return htmlEntities[k.toLowerCase()]??m;
  });
  input=decodeEntities(decodeEntities(input)).replace(/\\[ \t]*(?=\r?\n)/g,'').trim();
+
+// コピーされたJSONの構造部分に余分な \ が残っても復旧する。
+// JSON文字列内部の正当なエスケープ (例: \"quoted\") は維持する。
+ const stripOutsideStringBackslashes=(s)=>{
+  let out='',inside=false,escape=false;
+  for(const ch of s){
+   if(inside){
+    out+=ch;
+    if(escape){escape=false;continue}
+    if(ch==='\\'){escape=true;continue}
+    if(ch==='"')inside=false;
+   }else{
+    if(ch==='\\')continue;
+    if(ch==='"')inside=true;
+    out+=ch;
+   }
+  }
+  return out;
+ };
+ input=stripOutsideStringBackslashes(input).trim();
  const fence=input.match(/```(?:json|tsv|csv|text)?\s*([\s\S]*?)```/i);
  const content=fence?fence[1].trim():input;
  const variants=[content];
