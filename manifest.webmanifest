@@ -1,0 +1,11 @@
+{
+  "id": "./",
+  "name": "USCPA Word Lab",
+  "short_name": "USCPA Word Lab",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f7fb",
+  "theme_color": "#102246",
+  "lang": "ja"
+}
