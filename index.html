@@ -147,14 +147,14 @@ function isWeakUnmastered(w){
  const last=db.progress[w.id]?.last;
  return last!=='good'&&(!!w.flagged||last==='again'||last==='hard');
 }
-function pruneWeakStudySession(){
- if(mode!=='weak'||!session||!Array.isArray(session.items)||!session.items.length)return;
+function reconcileStudySession(){
+ if(!session||!Array.isArray(session.items)||!session.items.length)return;
  const lookup=new Map(db.words.map(w=>[w.id,w]));
  let removedBefore=0;
  const oldIndex=session.index;
  const filtered=session.items.filter((id,i)=>{
   const w=lookup.get(id);
-  const keep=!!w&&isWeakUnmastered(w)&&(activeSubject==='ALL'||getSubjects(w).includes(activeSubject));
+  const keep=!!w&&(mode!=='weak'||isWeakUnmastered(w))&&(activeSubject==='ALL'||getSubjects(w).includes(activeSubject));
   if(!keep&&i<oldIndex)removedBefore++;
   return keep;
  });
@@ -190,29 +190,65 @@ function makeQueue(){
  });
  return arr.map(w=>w.id)
 }
+
 const STUDY_SESSION_KEY='uscpa-wordlab-study-session-v2';
+const STUDY_CONTEXTS_KEY='uscpa-wordlab-study-contexts-v3';
+let studyContexts=Object.create(null);
+try{
+ const savedContexts=JSON.parse(localStorage.getItem(STUDY_CONTEXTS_KEY)||'{}');
+ if(savedContexts&&typeof savedContexts==='object'&&!Array.isArray(savedContexts)){
+  for(const [k,v] of Object.entries(savedContexts)){
+   if(/^(ALL|FAR|REG|AUD|TCP)\|(priority|new|due|weak|basic|account|process|all)$/.test(k)&&v&&Array.isArray(v.items))studyContexts[k]=v;
+  }
+ }
+}catch(e){}
+function studyContextKey(subject=activeSubject,studyMode=mode){return subject+'|'+studyMode}
+function studySnapshot(){
+ return {items:session.items.slice(),index:session.index,done:session.done,flipped:!!session.flipped,mode,direction,subject:activeSubject};
+}
 function saveStudySession(){
- try{localStorage.setItem(STUDY_SESSION_KEY,JSON.stringify({items:session.items,index:session.index,done:session.done,mode:mode,direction:direction,subject:activeSubject}))}catch(e){}
+ if(!session||!Array.isArray(session.items))return;
+ const record=studySnapshot();
+ studyContexts[studyContextKey()]=record;
+ try{localStorage.setItem(STUDY_SESSION_KEY,JSON.stringify(record))}catch(e){}
+ try{localStorage.setItem(STUDY_CONTEXTS_KEY,JSON.stringify(studyContexts))}catch(e){}
+}
+function applySavedStudySession(state){
+ if(!state||!Array.isArray(state.items)||state.items.length>20000)return false;
+ const validIds=new Set(db.words.map(w=>w.id));
+ const ids=state.items.filter(id=>typeof id==='string'&&validIds.has(id));
+ const rawIndex=Math.max(0,Math.min(state.items.length,Number(state.index)||0));
+ const anchor=state.items[rawIndex];
+ const found=ids.indexOf(anchor);
+ const index=rawIndex===state.items.length?ids.length:(found>=0?found:Math.min(rawIndex,ids.length));
+ session={items:ids,index,done:Math.max(0,Number(state.done)||0),flipped:!!state.flipped&&index<ids.length};
+ return true;
 }
 function restoreStudySession(){
  try{
   const raw=localStorage.getItem(STUDY_SESSION_KEY);
   if(!raw)return false;
-  const state=JSON.parse(raw);
-  if(!state||!Array.isArray(state.items)||state.items.length>20000)return false;
-  const known=new Set(db.words.map(w=>w.id));
-  const ids=state.items.filter(id=>typeof id==='string'&&known.has(id));
-  if(!ids.length)return false;
-  if(['priority','new','due','weak','basic','account','process','all'].includes(state.mode))mode=state.mode;
-  if(['en-ja','ja-en'].includes(state.direction))direction=state.direction;
-  if(['ALL','FAR','REG','AUD','TCP'].includes(state.subject))activeSubject=state.subject;
-  const oldIndex=Math.max(0,Math.min(state.items.length,Number(state.index)||0));
-  const anchor=state.items[oldIndex],anchorIndex=ids.indexOf(anchor);
-  const newIndex=oldIndex===state.items.length?ids.length:(anchorIndex>=0?anchorIndex:Math.min(oldIndex,ids.length));
-  session={items:ids,index:newIndex,done:Math.max(0,Number(state.done)||0)};
+  const record=JSON.parse(raw);
+  if(!record||!Array.isArray(record.items))return false;
+  if(['priority','new','due','weak','basic','account','process','all'].includes(record.mode))mode=record.mode;
+  if(['ALL','FAR','REG','AUD','TCP'].includes(record.subject))activeSubject=record.subject;
+  if(['en-ja','ja-en'].includes(record.direction))direction=record.direction;
+  if(!applySavedStudySession(record))return false;
+  studyContexts[studyContextKey()]=studySnapshot();
   return true;
  }catch(e){return false}
 }
+function switchStudyContext(subject=activeSubject,studyMode=mode){
+ if(subject===activeSubject&&studyMode===mode){saveStudySession();return}
+ saveStudySession();
+ activeSubject=subject;mode=studyMode;
+ const saved=studyContexts[studyContextKey()];
+ if(!applySavedStudySession(saved)){
+  session={items:makeQueue(),index:0,done:0,flipped:false};
+ }
+ saveStudySession();
+}
+
 function learnedSummary(){
  const all=db.words,total=all.length,memorized=all.filter(w=>db.progress[w.id]?.last==='good').length;
  const percent=total?Math.round(100*memorized/total):0;
@@ -225,9 +261,9 @@ function resumeStudyPanel(){
  const types={weak:'苦手だけ',due:'復習期限',priority:'おまかせ',new:'未学習',all:'全単語',basic:'基本用語',account:'勘定科目',process:'簿記一巡'};
  return '<div class="resume-study-bar"><div><strong>学習の続きがあります</strong><small>'+esc(types[mode]||'学習')+' ・ '+current+' / '+total+'枚目（前回の位置を保存中）</small></div><button type="button" id="resume-study">続きから再開 →</button></div>';
 }
-function restart(){session={items:makeQueue(),index:0,done:0};saveStudySession()}
+function restart(){session={items:makeQueue(),index:0,done:0,flipped:false};saveStudySession()}
 function currentWord(){return db.words.find(w=>w.id===session.items[session.index])}
-function study(){if(!session.items.length && !session.done)restart();let w=currentWord();const count=session.items.length,idx=session.index;const percent=count?Math.floor(Math.min(idx,count)/count*100):0;const chip=[['priority','おまかせ'],['new','未学習'],['due','復習期限'],['weak','苦手だけ'],['basic','基本用語'],['account','勘定科目'],['process','簿記一巡'],['all','全単語']];return `${learnedSummary()}<section class="panel"><div class="title-row"><div><div class="eyebrow">FLASHCARD STUDY</div><h2>フラッシュカード</h2></div><button class="btn small secondary" id="restart" type="button">↻ 最初から</button></div><div class="study-controls"><div class="fieldgroup"><label class="field-label" for="studyModeSelect">出題範囲</label><select id="studyModeSelect" class="field">${chip.map(([k,v])=>`<option value="${k}" ${mode===k?'selected':''}>${v}</option>`).join('')}</select></div><div class="fieldgroup"><label class="field-label" for="directionSelect">出題方向</label><select id="directionSelect" class="field"><option value="en-ja" ${direction==='en-ja'?'selected':''}>英語 → 日本語</option><option value="ja-en" ${direction==='ja-en'?'selected':''}>日本語 → 英語</option></select></div></div></section><section class="cardzone">${!w?`<div class="panel" style="margin-top:14px"><div class="empty"><div style="font-size:36px">✓</div><h3>${session.done?'このセットは完了！':'該当する単語がありません'}</h3><p>${session.done?'今回 '+session.done+'語を判定しました。':'苦手な単語は残っていません。ほかの学習範囲にも切り替えられます。'}</p><div style="margin-top:16px"><button type="button" class="btn primary" id="retry">もう一度学習する</button></div></div></div>`:`<div class="learnbar"><span>${idx+1} / ${count} 枚</span><span>${getSubjects(w).join(' / ')} · ${esc(w.section)}　${w.flagged?'★ 重点単語':''}</span></div><div class="meter"><div style="width:${percent}%"></div></div><button type="button" class="flipcard" id="flashcard" aria-label="カードを裏返す" aria-pressed="false"><span class="flipper"><span class="face front"><span class="overline">${getSubjects(w).join(' · ')} ・ ${direction==='en-ja'?'ENGLISH':'日本語'}</span><span class="term ${direction==='ja-en'?'smaller':''}">${esc(direction==='en-ja'?w.term:w.ja)}</span><span class="hint">タップして答えを表示</span></span><span class="face back"><span class="overline">${direction==='en-ja'?'日本語':'ENGLISH'}</span><span class="answer">${esc(direction==='en-ja'?w.ja:w.term)}</span><span class="note">${esc(w.note||'')}</span><span class="example">${esc(w.example||'')}${w.translation?'<em>'+esc(w.translation)+'</em>':''}</span><span class="hint">もう一度タップして表に戻る</span></span></span></button>${audioControls(w,true)}<p class="audio-hint">🔊を押すとアメリカ英語で読み上げます。繰り返し再生できます。</p><div class="card-actions"><div id="pre-grade"><button type="button" class="btn primary full" id="reveal">答えを見る</button></div><div id="grade" class="rating hide"><button type="button" class="again" data-grade="again">× もう一度</button><button type="button" class="hard" data-grade="hard">△ あやふや</button><button type="button" class="good" data-grade="good">✓ 覚えた</button></div></div><div class="learning-foot"><button class="mini" id="prev" type="button" ${idx===0?'disabled':''}>← 前のカード</button><button class="mini star" id="toggle-star" type="button">${w.flagged?'★ 重点解除':'☆ 重点に追加'}</button><button class="mini" id="skip" type="button">スキップ →</button></div><div class="explainer">カードをめくってもスクロール位置は変わりません。判定すると次のカードへ進み、復習タイミングを記録します。</div>`}</section>`}
+function study(){let w=currentWord();const count=session.items.length,idx=session.index;const percent=count?Math.floor(Math.min(idx,count)/count*100):0;const chip=[['priority','おまかせ'],['new','未学習'],['due','復習期限'],['weak','苦手だけ'],['basic','基本用語'],['account','勘定科目'],['process','簿記一巡'],['all','全単語']];return `${learnedSummary()}<section class="panel"><div class="title-row"><div><div class="eyebrow">FLASHCARD STUDY</div><h2>フラッシュカード</h2></div><button class="btn small secondary" id="restart" type="button">↻ 最初から</button></div><div class="study-controls"><div class="fieldgroup"><label class="field-label" for="studyModeSelect">出題範囲</label><select id="studyModeSelect" class="field">${chip.map(([k,v])=>`<option value="${k}" ${mode===k?'selected':''}>${v}</option>`).join('')}</select></div><div class="fieldgroup"><label class="field-label" for="directionSelect">出題方向</label><select id="directionSelect" class="field"><option value="en-ja" ${direction==='en-ja'?'selected':''}>英語 → 日本語</option><option value="ja-en" ${direction==='ja-en'?'selected':''}>日本語 → 英語</option></select></div></div></section><section class="cardzone">${!w?`<div class="panel" style="margin-top:14px"><div class="empty"><div style="font-size:36px">✓</div><h3>${session.done?'このセットは完了！':'該当する単語がありません'}</h3><p>${session.done?'今回 '+session.done+'語を判定しました。':'苦手な単語は残っていません。ほかの学習範囲にも切り替えられます。'}</p><div style="margin-top:16px"><button type="button" class="btn primary" id="retry">もう一度学習する</button></div></div></div>`:`<div class="learnbar"><span>${idx+1} / ${count} 枚</span><span>${getSubjects(w).join(' / ')} · ${esc(w.section)}　${w.flagged?'★ 重点単語':''}</span></div><div class="meter"><div style="width:${percent}%"></div></div><button type="button" class="flipcard ${session.flipped?'flipped':''}" id="flashcard" aria-label="カードを裏返す" aria-pressed="${!!session.flipped}"><span class="flipper"><span class="face front"><span class="overline">${getSubjects(w).join(' · ')} ・ ${direction==='en-ja'?'ENGLISH':'日本語'}</span><span class="term ${direction==='ja-en'?'smaller':''}">${esc(direction==='en-ja'?w.term:w.ja)}</span><span class="hint">タップして答えを表示</span></span><span class="face back"><span class="overline">${direction==='en-ja'?'日本語':'ENGLISH'}</span><span class="answer">${esc(direction==='en-ja'?w.ja:w.term)}</span><span class="note">${esc(w.note||'')}</span><span class="example">${esc(w.example||'')}${w.translation?'<em>'+esc(w.translation)+'</em>':''}</span><span class="hint">もう一度タップして表に戻る</span></span></span></button>${audioControls(w,true)}<p class="audio-hint">🔊を押すとアメリカ英語で読み上げます。繰り返し再生できます。</p><div class="card-actions"><div id="pre-grade" class="${session.flipped?'hide':''}"><button type="button" class="btn primary full" id="reveal">答えを見る</button></div><div id="grade" class="rating ${session.flipped?'':'hide'}"><button type="button" class="again" data-grade="again">× もう一度</button><button type="button" class="hard" data-grade="hard">△ あやふや</button><button type="button" class="good" data-grade="good">✓ 覚えた</button></div></div><div class="learning-foot"><button class="mini" id="prev" type="button" ${idx===0?'disabled':''}>← 前のカード</button><button class="mini star" id="toggle-star" type="button">${w.flagged?'★ 重点解除':'☆ 重点に追加'}</button><button class="mini" id="skip" type="button">スキップ →</button></div><div class="explainer">カードをめくってもスクロール位置は変わりません。判定すると次のカードへ進み、復習タイミングを記録します。</div>`}</section>`}
 function libraryRows(){
  const key=norm(search);
  const list=visibleWords().filter(w=>{
@@ -412,7 +448,7 @@ function aiSave(){
   }
  });
  if(!added&&!linked)return toast('追加できる単語・科目がありません',true);
- save();restart();aiCandidates=[];aiDraft='';render();toast('新規 '+added+'語、科目追加 '+linked+'件／合計 '+db.words.length+'語');
+ save();saveStudySession();aiCandidates=[];aiDraft='';render();toast('新規 '+added+'語、科目追加 '+linked+'件／合計 '+db.words.length+'語');
 }
 async function aiFile(file){try{if(file.size>1500000)throw Error('ファイルは1.5MB以内にしてください');const raw=await file.text();aiDraft=raw;const f=$('ai-paste');if(f)f.value=raw;aiParse(raw)}catch(e){toast(e.message,true)}}
 async function copyAI(){try{await navigator.clipboard.writeText(AI_PROMPT+"\n今回の優先科目："+importSubject);toast('AI用の指示をコピーしました。写真と一緒にChatGPTへ送ってください')}catch(e){try{const t=document.createElement('textarea');t.value=AI_PROMPT+"\n今回の優先科目："+importSubject;t.style.position='fixed';t.style.opacity='0';document.body.appendChild(t);t.select();const ok=document.execCommand('copy');t.remove();if(!ok)throw Error('copy fail');toast('読み取り指示をコピーしました')}catch(err){toast('コピーできませんでした。ブラウザーから開いて試してください',true)}}}
@@ -430,7 +466,7 @@ function progressPage(){
  const groups=[...new Set(visibleWords().map(w=>w.section||'追加した単語'))].map(name=>[name,visibleWords().filter(w=>(w.section||'追加した単語')===name)]).filter(x=>x[1].length);
  return `${statHtml()}<section class="panel"><div class="eyebrow">FOUR SUBJECTS · PROGRESS</div><h2>科目別学習状況</h2><div class="subject-progress-grid">${subjectRows}</div><p class="subtitle" style="margin-top:13px">同じ用語が複数科目に関連する場合、科目別数にはそれぞれ計上します。全科目数はユニーク語数です。</p><div style="margin:18px 0"><div style="font-size:13px;display:flex;justify-content:space-between"><strong>${activeSubject==='ALL'?'全科目':activeSubject} の学習進捗</strong><span>${r.reviewed} / ${r.total}語</span></div><div class="meter" style="height:11px;margin-top:7px"><div style="width:${r.total?Math.round(100*r.reviewed/r.total):0}%"></div></div></div>${groups.map(([name,words])=>`<div class="barrow"><span>${esc(name)}</span><div class="track"><div class="fill" style="width:${Math.round(100*words.filter(w=>db.progress[w.id]).length/words.length)}%"></div></div><b>${words.filter(w=>db.progress[w.id]).length}/${words.length}</b></div>`).join('')}<div class="note-block" style="margin-top:15px">「覚えた」は初回3日後、「あやふや」は翌日、「もう一度」は10分後を目安に復習対象となります。</div></section><section class="panel"><div class="eyebrow">MY DATA</div><h2>データ保存と引き継ぎ</h2><p class="subtitle" style="margin:10px 0 15px">既存の単語と学習履歴を保持する保存形式です。Safariとホーム画面版は自動同期しません。端末変更時はバックアップを保存してください。</p><div class="btnrow"><button class="btn primary" type="button" id="export">↓ 全科目バックアップ保存</button><button class="btn secondary" type="button" id="importBtn">↑ バックアップを統合</button><input id="importFile" type="file" accept="application/json,.json" style="display:none"></div><div class="note-block" style="margin-top:16px"><strong>Safari ⇄ ホーム画面版でデータを移す</strong><p style="margin:8px 0">① 保存元で「全データをコピー」 → ② 保存先で貼り付け → ③ 「統合」。重複は増やさず科目タグも統合します。</p><button class="btn primary" type="button" id="sync-copy">① 全データをコピー</button><label class="field-label" for="sync-paste" style="margin-top:12px">② 他の画面からコピーしたデータ</label><textarea class="field ai-textarea" id="sync-paste" rows="3" placeholder="ここにバックアップのJSONを貼り付け"></textarea><div style="margin-top:10px"><button class="btn secondary" type="button" id="sync-merge">③ データを統合</button></div><p id="sync-feedback" role="status" style="font-size:12px;color:#526681;margin:9px 0"></p><small>復習履歴はGitHubに公開されません。手動移行です。</small></div>${!hasStorage?'<div class="alert error">端末内への保存が制限されています。必ずバックアップを使用してください。</div>':''}</section>`
 }
-function render(preserve=true){const y=window.scrollY;pruneWeakStudySession();renderSubjectBar();renderNav();$('app').innerHTML=(tab==='study'?'':resumeStudyPanel())+(tab==='study'?study():tab==='library'?library():tab==='add'?addPage():progressPage());if(preserve)window.scrollTo(0,y)}
+function render(preserve=true){const y=window.scrollY;reconcileStudySession();renderSubjectBar();renderNav();$('app').innerHTML=(tab==='study'?'':resumeStudyPanel())+(tab==='study'?study():tab==='library'?library():tab==='add'?addPage():progressPage());if(preserve)window.scrollTo(0,y)}
 function toast(msg,err=false){let old=$('toast');if(old)old.remove();const e=document.createElement('div');e.id='toast';e.className='toast';e.textContent=msg;e.style.background=err?'#903441':'#203c5b';document.body.appendChild(e);if(toastTimer)clearTimeout(toastTimer);toastTimer=setTimeout(()=>e.remove(),2400)}
 
 const SPEECH_RATE_KEY='uscpa-wordlab-speech-rate-v1';
@@ -469,8 +505,8 @@ function speakEnglish(input){
  }catch(e){toast('音声を再生できませんでした。Safariで開いてお試しください',true)}
 }
 
-function flip(){let card=$('flashcard');if(!card)return;let on=card.classList.toggle('flipped');card.setAttribute('aria-pressed',String(on));$('pre-grade').classList.toggle('hide',on);$('grade').classList.toggle('hide',!on)}
-function next(){session.index++;saveStudySession();render()}
+function flip(){let card=$('flashcard');if(!card)return;let on=card.classList.toggle('flipped');card.setAttribute('aria-pressed',String(on));$('pre-grade').classList.toggle('hide',on);$('grade').classList.toggle('hide',!on);session.flipped=on;saveStudySession()}
+function next(){session.index++;session.flipped=false;saveStudySession();render()}
 function grade(r){const w=currentWord();if(!w)return;const p=db.progress[w.id]||{reps:0,interval:0};let interval=0;if(r==='again'){p.reps=0;p.interval=0;p.due=Date.now()+10*60*1000}else if(r==='hard'){p.reps=Math.max(0,p.reps);p.interval=1;p.due=Date.now()+24*60*60*1000}else{p.reps=(p.reps||0)+1;interval=p.reps===1?3:p.reps===2?7:Math.round(Math.max(7,(p.interval||7)*2.2));p.interval=interval;p.due=Date.now()+interval*24*60*60*1000}p.last=r;p.updated=Date.now();db.progress[w.id]=p;save();session.done++;next()}
 function updateLibrary(){const n=$('library-rows');if(n)n.innerHTML=libraryRows()}
 function wordSave(e){
@@ -484,7 +520,7 @@ function wordSave(e){
  const data={term,ja,note:$('note').value.trim(),example:$('example').value.trim(),translation:$('translation').value.trim(),section:$('section').value.trim()||'追加した単語',category:'追加',subjects,flagged:false};
  if(editingId){const idx=db.words.findIndex(w=>w.id===editingId);if(idx>=0)db.words[idx]={...db.words[idx],...data,flagged:db.words[idx].flagged}}
  else db.words.push({id:'custom-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),...data});
- save();editingId=null;restart();render();toast('単語を保存しました');
+ save();editingId=null;saveStudySession();render();toast('単語を保存しました');
 }
 function bulkAdd(){
  const lines=($('bulk').value||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),subject=importSubject;
@@ -496,7 +532,7 @@ function bulkAdd(){
   if(existing){const subs=getSubjects(existing);if(!subs.includes(subject)){existing.subjects=[...subs,subject];linked++}else skipped++;continue}
   db.words.push({id:'custom-'+Date.now()+'-'+Math.random().toString(36).slice(2,8),term:f[0],ja:f[1],note:f[2]||'',example:'',translation:'',section:'追加した単語',category:'追加',subjects:[subject],flagged:false});added++;
  }
- save();$('bulk').value='';restart();
+ save();$('bulk').value='';saveStudySession();renderSubjectBar();
  $('bulk-feedback').innerHTML=`<div class="alert">${subject} に新規 ${added}語、科目追加 ${linked}件。重複など ${skipped}件。</div>`;
 }
 function mergeWordlabBackup(current,incoming){
@@ -552,7 +588,7 @@ function syncMerge(){
   const merged=mergeWordlabBackup(db,incoming);
   if(!merged.added&&!merged.updated&&!merged.flagged&&!merged.subjectChanges){const msg=$('sync-feedback');if(msg)msg.textContent='引き継ぐ新しい単語・科目・復習記録はありませんでした。';return}
   if(!confirm('新規 '+merged.added+'語、科目更新 '+merged.subjectChanges+'件、復習記録 '+merged.updated+'件を統合しますか？'))return;
-  db=merged.data;save();restart();render(false);toast('引き継ぎ完了／合計'+db.words.length+'語');
+  db=merged.data;save();saveStudySession();render(false);toast('引き継ぎ完了／合計'+db.words.length+'語');
  }catch(e){const box=$('sync-feedback');if(box)box.textContent='取込できません：'+e.message;toast('取込に失敗しました',true)}
 }
 function exportData(){let data={app:'uscpa-wordlab',version:1,exportedAt:new Date().toISOString(),words:db.words,progress:db.progress};let blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='USCPA_WordLab_Backup_'+new Date().toISOString().slice(0,10)+'.json';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);toast('バックアップを保存しました')}
@@ -561,13 +597,13 @@ function importData(file){
   const incoming=JSON.parse(content);const merged=mergeWordlabBackup(db,incoming);
   if(!merged.added&&!merged.updated&&!merged.flagged&&!merged.subjectChanges)return toast('追加・更新する単語や復習履歴はありませんでした');
   if(!confirm('新規 '+merged.added+'語、科目更新 '+merged.subjectChanges+'件、復習記録 '+merged.updated+'件を統合しますか？ 現在のデータは削除しません。'))return;
-  db=merged.data;save();restart();render();toast('データを統合しました。合計'+db.words.length+'語');
+  db=merged.data;save();saveStudySession();render();toast('データを統合しました。合計'+db.words.length+'語');
  }).catch(e=>toast('読込失敗：'+e.message,true));
 }
 // Delegation: study controls only alter the card, not browser location/hash or scroll.
-document.addEventListener('click',e=>{const pronunciation=e.target.closest('[data-speak-word],[data-speak-example]');if(pronunciation){e.preventDefault();e.stopPropagation();const key=pronunciation.dataset.speakWord||pronunciation.dataset.speakExample;const entry=db.words.find(w=>w.id===key);if(entry)speakEnglish(pronunciation.hasAttribute('data-speak-example')?entry.example:entry.term);return}if(e.target.closest('#resume-study')){tab='study';render(false);window.scrollTo(0,0);return}const subjectButton=e.target.closest('[data-subject]');if(subjectButton){activeSubject=subjectButton.dataset.subject;importSubject=activeSubject==='ALL'?'FAR':activeSubject;restart();render(false);return}const nav=e.target.closest('[data-nav]');if(nav){saveStudySession();tab=nav.dataset.nav;editingId=null;render(false);window.scrollTo(0,0);return}const modeBtn=e.target.closest('[data-mode]');if(modeBtn){mode=modeBtn.dataset.mode;restart();render();return}const dirBtn=e.target.closest('[data-direction]');if(dirBtn){direction=dirBtn.dataset.direction;saveStudySession();render();return}if(e.target.closest('#flashcard')||e.target.closest('#reveal')){flip();return}const rating=e.target.closest('[data-grade]');if(rating){grade(rating.dataset.grade);return}if(e.target.closest('#skip')){next();return}if(e.target.closest('#prev')){session.index=Math.max(0,session.index-1);saveStudySession();render();return}if(e.target.closest('#restart')||e.target.closest('#retry')){restart();render();return}if(e.target.closest('#toggle-star')){const w=currentWord();if(w){w.flagged=!w.flagged;save();render();toast(w.flagged?'重点単語に追加':'重点設定を解除')}return}const star=e.target.closest('[data-star]');if(star){const w=db.words.find(x=>x.id===star.dataset.star);if(w){w.flagged=!w.flagged;save();updateLibrary()}return}const edit=e.target.closest('[data-edit]');if(edit){editingId=edit.dataset.edit;tab='add';render(false);window.scrollTo(0,0);return}const del=e.target.closest('[data-delete]');if(del){const w=db.words.find(x=>x.id===del.dataset.delete);if(w?.id.startsWith('custom-')&&confirm('この単語を削除しますか？')){db.words=db.words.filter(x=>x.id!==w.id);delete db.progress[w.id];save();restart();updateLibrary()}return}if(e.target.closest('#more')){visibleLimit+=50;updateLibrary();return}if(e.target.closest('#cancel-edit')){editingId=null;render();return}if(e.target.closest('#ai-copy')){copyAI();return}if(e.target.closest('#ai-file-btn')){$('ai-file')?.click();return}if(e.target.closest('#ai-parse')){aiDraft=$('ai-paste').value;aiParse(aiDraft);return}if(e.target.closest('#ai-clear')){aiCandidates=[];aiDraft='';if($('ai-paste'))$('ai-paste').value='';if($('ai-feedback'))$('ai-feedback').innerHTML='';aiPreviewRefresh();return}if(e.target.closest('#ai-save')){aiSave();return}if(e.target.closest('#bulk-add')){bulkAdd();return}if(e.target.closest('#sync-copy')){syncCopy();return}if(e.target.closest('#sync-merge')){syncMerge();return}if(e.target.closest('#export')){exportData();return}if(e.target.closest('#importBtn')){$('importFile').click();return}if(e.target.closest('#resetProgress')){if(confirm('学習の判定と復習予定をすべて削除しますか？単語と重点設定は残ります。')){db.progress={};save();restart();render();toast('学習判定をリセットしました')}return}});
+document.addEventListener('click',e=>{const pronunciation=e.target.closest('[data-speak-word],[data-speak-example]');if(pronunciation){e.preventDefault();e.stopPropagation();const key=pronunciation.dataset.speakWord||pronunciation.dataset.speakExample;const entry=db.words.find(w=>w.id===key);if(entry)speakEnglish(pronunciation.hasAttribute('data-speak-example')?entry.example:entry.term);return}if(e.target.closest('#resume-study')){tab='study';render(false);window.scrollTo(0,0);return}const subjectButton=e.target.closest('[data-subject]');if(subjectButton){switchStudyContext(subjectButton.dataset.subject,mode);importSubject=activeSubject==='ALL'?'FAR':activeSubject;render(false);return}const nav=e.target.closest('[data-nav]');if(nav){saveStudySession();tab=nav.dataset.nav;editingId=null;render(false);window.scrollTo(0,0);return}const modeBtn=e.target.closest('[data-mode]');if(modeBtn){switchStudyContext(activeSubject,modeBtn.dataset.mode);render();return}const dirBtn=e.target.closest('[data-direction]');if(dirBtn){direction=dirBtn.dataset.direction;saveStudySession();render();return}if(e.target.closest('#flashcard')||e.target.closest('#reveal')){flip();return}const rating=e.target.closest('[data-grade]');if(rating){grade(rating.dataset.grade);return}if(e.target.closest('#skip')){next();return}if(e.target.closest('#prev')){session.index=Math.max(0,session.index-1);session.flipped=false;saveStudySession();render();return}if(e.target.closest('#restart')||e.target.closest('#retry')){restart();render();return}if(e.target.closest('#toggle-star')){const w=currentWord();if(w){w.flagged=!w.flagged;save();render();toast(w.flagged?'重点単語に追加':'重点設定を解除')}return}const star=e.target.closest('[data-star]');if(star){const w=db.words.find(x=>x.id===star.dataset.star);if(w){w.flagged=!w.flagged;save();updateLibrary()}return}const edit=e.target.closest('[data-edit]');if(edit){editingId=edit.dataset.edit;tab='add';render(false);window.scrollTo(0,0);return}const del=e.target.closest('[data-delete]');if(del){const w=db.words.find(x=>x.id===del.dataset.delete);if(w?.id.startsWith('custom-')&&confirm('この単語を削除しますか？')){db.words=db.words.filter(x=>x.id!==w.id);delete db.progress[w.id];save();reconcileStudySession();saveStudySession();renderSubjectBar();updateLibrary()}return}if(e.target.closest('#more')){visibleLimit+=50;updateLibrary();return}if(e.target.closest('#cancel-edit')){editingId=null;render();return}if(e.target.closest('#ai-copy')){copyAI();return}if(e.target.closest('#ai-file-btn')){$('ai-file')?.click();return}if(e.target.closest('#ai-parse')){aiDraft=$('ai-paste').value;aiParse(aiDraft);return}if(e.target.closest('#ai-clear')){aiCandidates=[];aiDraft='';if($('ai-paste'))$('ai-paste').value='';if($('ai-feedback'))$('ai-feedback').innerHTML='';aiPreviewRefresh();return}if(e.target.closest('#ai-save')){aiSave();return}if(e.target.closest('#bulk-add')){bulkAdd();return}if(e.target.closest('#sync-copy')){syncCopy();return}if(e.target.closest('#sync-merge')){syncMerge();return}if(e.target.closest('#export')){exportData();return}if(e.target.closest('#importBtn')){$('importFile').click();return}if(e.target.closest('#resetProgress')){if(confirm('学習の判定と復習予定をすべて削除しますか？単語と重点設定は残ります。')){db.progress={};save();restart();render();toast('学習判定をリセットしました')}return}});
 document.addEventListener('input',e=>{if(e.target.id==='search'){search=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-paste'){aiDraft=e.target.value}if(e.target.matches('[data-ai-index][data-ai-field]')&&e.target.dataset.aiField!=='selected'){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row)row[e.target.dataset.aiField]=e.target.value}});
-document.addEventListener('change',e=>{if(e.target.id==='speechRate'){const next=Number(e.target.value);if([0.65,0.85,1].includes(next)){speechRate=next;try{localStorage.setItem(SPEECH_RATE_KEY,String(next))}catch(e){};return}}if(e.target.id==='filter'){filter=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-default-subject'){importSubject=e.target.value;if(aiCandidates.length){aiCandidates.forEach(w=>{if(!w.explicitSubject)w.subjects=[importSubject]});aiPreviewRefresh()}}if(e.target.matches('[data-ai-index][data-ai-subject]')){const w=aiCandidates[Number(e.target.dataset.aiIndex)];if(w){const selected=new Set(getSubjects(w));if(e.target.checked)selected.add(e.target.dataset.aiSubject);else selected.delete(e.target.dataset.aiSubject);if(!selected.size){e.target.checked=true;return}w.subjects=[...selected];w.selected=true;w.explicitSubject=true;aiPreviewRefresh()}}if(e.target.id==='studyModeSelect'){mode=e.target.value;restart();render()}if(e.target.id==='directionSelect'){direction=e.target.value;saveStudySession();render()}if(e.target.id==='importFile'&&e.target.files?.[0])importData(e.target.files[0]);if(e.target.id==='ai-file'&&e.target.files?.[0]){aiFile(e.target.files[0]);e.target.value=''}if(e.target.matches('[data-ai-index][data-ai-field]')){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row){if(e.target.dataset.aiField==='selected')row.selected=e.target.checked;else{row[e.target.dataset.aiField]=e.target.value;const m=aiMeta();if(['new','linked'].includes(m.status[Number(e.target.dataset.aiIndex)]))row.selected=true}aiPreviewRefresh()}}});
+document.addEventListener('change',e=>{if(e.target.id==='speechRate'){const next=Number(e.target.value);if([0.65,0.85,1].includes(next)){speechRate=next;try{localStorage.setItem(SPEECH_RATE_KEY,String(next))}catch(e){};return}}if(e.target.id==='filter'){filter=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-default-subject'){importSubject=e.target.value;if(aiCandidates.length){aiCandidates.forEach(w=>{if(!w.explicitSubject)w.subjects=[importSubject]});aiPreviewRefresh()}}if(e.target.matches('[data-ai-index][data-ai-subject]')){const w=aiCandidates[Number(e.target.dataset.aiIndex)];if(w){const selected=new Set(getSubjects(w));if(e.target.checked)selected.add(e.target.dataset.aiSubject);else selected.delete(e.target.dataset.aiSubject);if(!selected.size){e.target.checked=true;return}w.subjects=[...selected];w.selected=true;w.explicitSubject=true;aiPreviewRefresh()}}if(e.target.id==='studyModeSelect'){switchStudyContext(activeSubject,e.target.value);render()}if(e.target.id==='directionSelect'){direction=e.target.value;saveStudySession();render()}if(e.target.id==='importFile'&&e.target.files?.[0])importData(e.target.files[0]);if(e.target.id==='ai-file'&&e.target.files?.[0]){aiFile(e.target.files[0]);e.target.value=''}if(e.target.matches('[data-ai-index][data-ai-field]')){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row){if(e.target.dataset.aiField==='selected')row.selected=e.target.checked;else{row[e.target.dataset.aiField]=e.target.value;const m=aiMeta();if(['new','linked'].includes(m.status[Number(e.target.dataset.aiIndex)]))row.selected=true}aiPreviewRefresh()}}});
 document.addEventListener('submit',e=>{if(e.target.id==='wordform')wordSave(e)});
 document.addEventListener('keydown',e=>{if(e.target.id==='flashcard'&&(e.key==='Enter'||e.key===' ')){e.preventDefault();flip()}});
 window.addEventListener('pagehide',saveStudySession);
