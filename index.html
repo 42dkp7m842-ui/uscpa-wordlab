@@ -485,24 +485,47 @@ function audioControls(w,withRate=false){
  (w.example?'<button type="button" class="audio-btn example-audio" data-speak-example="'+esc(w.id)+'" aria-label="英文例を再生">🔉 例文を聞く</button>':'')+
  (withRate?audioSpeedSelector():'')+'</div>';
 }
+let activeSpeech=null;
+let speechStartTimer;
+let useDefaultVoice=false;
 function speakEnglish(input){
  const text=String(input||'').trim();
  if(!text)return toast('この単語には読み上げる英文がありません',true);
- if(!('speechSynthesis' in window)||!('SpeechSynthesisUtterance' in window))return toast('このブラウザーは音声読み上げに対応していません',true);
+ const synth=window.speechSynthesis;
+ if(!synth||!window.SpeechSynthesisUtterance)return toast('このブラウザーは音声読み上げに対応していません',true);
+ const utterance=new SpeechSynthesisUtterance(text);
+ function finish(){
+  if(activeSpeech!==utterance)return false;
+  clearTimeout(speechStartTimer);
+  activeSpeech=null;
+  return true;
+ }
+ function failed(){
+  if(!finish())return;
+  useDefaultVoice=true;
+  toast('音声を開始できませんでした。もう一度、発音ボタンを押してください',true);
+ }
  try{
-  const synth=window.speechSynthesis;
-  const utterance=new SpeechSynthesisUtterance(text);
+  // Keep the new request current even if cancel dispatches an old error immediately.
+  activeSpeech=utterance;
+  clearTimeout(speechStartTimer);
+  if(synth.speaking||synth.pending)synth.cancel();
+  if(synth.paused)synth.resume();
   utterance.lang='en-US';
   utterance.rate=speechRate;
-  utterance.pitch=1;
-  utterance.volume=1;
-  const voices=synth.getVoices();
-  const english=voices.find(v=>/^en-US$/i.test(v.lang))||voices.find(v=>/^en/i.test(v.lang));
-  if(english)utterance.voice=english;
-  utterance.onerror=function(e){if(e.error&&e.error!=='interrupted'&&e.error!=='canceled')toast('音声が再生できません。iPhoneの音量や音声設定をご確認ください',true)};
-  synth.cancel();
+  if(!useDefaultVoice){
+   const voices=synth.getVoices().filter(v=>/^en(?:[-_]|$)/i.test(v.lang));
+   const us=v=>/^en[-_]US$/i.test(v.lang);
+   const voice=voices.find(v=>v.localService&&us(v))||voices.find(v=>v.localService)||voices.find(us);
+   if(voice)utterance.voice=voice;
+  }
+  utterance.onstart=()=>{if(activeSpeech===utterance)clearTimeout(speechStartTimer)};
+  utterance.onend=finish;
+  utterance.onerror=failed;
+  speechStartTimer=setTimeout(failed,5000);
+  // Start within the original tap, including when the voice list is still loading.
   synth.speak(utterance);
- }catch(e){toast('音声を再生できませんでした。Safariで開いてお試しください',true)}
+ }catch(e){failed()}
 }
 
 function flip(){let card=$('flashcard');if(!card)return;let on=card.classList.toggle('flipped');card.setAttribute('aria-pressed',String(on));$('pre-grade').classList.toggle('hide',on);$('grade').classList.toggle('hide',!on);session.flipped=on;saveStudySession()}
