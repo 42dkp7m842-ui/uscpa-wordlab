@@ -81,6 +81,7 @@
 .resume-study-bar small{display:block;font-size:11px;color:#657b98;margin-top:3px}
 .resume-study-bar button{white-space:nowrap;border:0;border-radius:10px;background:#355ce7;color:white;padding:10px 13px;font-size:12px;font-weight:800;min-height:43px}
 @media(max-width:430px){.resume-study-bar{align-items:stretch;gap:8px}.resume-study-bar button{padding:10px 8px}}
+.cloze-prompt{font-size:clamp(18px,4vw,26px);overflow:auto;max-height:75%}.diff-field{display:flex;gap:.6rem;padding:.65rem;background:#f4f7fb;margin:.4rem 0;border-radius:8px}.diff-field small,.extra-detail{display:block;white-space:pre-line;overflow-wrap:anywhere}.diff-field input{align-self:flex-start}.resume-study-bar button{overflow-wrap:anywhere}.panel .btnrow{margin:10px 0}
 </style>
 </head>
 <body>
@@ -147,6 +148,36 @@ function isWeakUnmastered(w){
  const last=db.progress[w.id]?.last;
  return last!=='good'&&(!!w.flagged||last==='again'||last==='hard');
 }
+let sourcePage='',batchSource='';
+const detailLabels={sources:'出典',meanings:'別の意味',notes:'補足',examples:'別の例文'};
+function values(word,key){return Array.isArray(word?.[key])?word[key].filter(v=>typeof v==='string'&&v.trim()):[]}
+function appendDetail(word,key,value){
+ if(!value||values(word,key).includes(value))return false;
+ word[key]=[...values(word,key),value];return true;
+}
+function detailsHtml(w){
+ return Object.entries(detailLabels).flatMap(([k,label])=>values(w,k).map(v=>`<div class="extra-detail"><b>${label}</b> ${esc(v)}</div>`)).join('');
+}
+function cloze(w){
+ const term=w.term.trim();if(!term)return null;
+ const escaped=term.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s+');
+ const pattern=new RegExp('(^|[^a-z0-9])('+escaped+')(?=$|[^a-z0-9])','gi');
+ for(const sample of [w.example,...values(w,'examples').map(v=>v.split('\n')[0])]){
+  if(!sample)continue;
+  let answer='';
+  const prompt=sample.replace(pattern,(_,prefix,match)=>{answer=match;return prefix+'____'});
+  if(answer)return {prompt,answer,sample};
+ }
+ return null;
+}
+function difficult(w){
+ return isWeakUnmastered(w)&&['again','hard'].includes(db.progress[w.id]?.last);
+}
+function topFive(words){
+ const cutoff=Date.now()-30*86400000;
+ const recent=w=>Array.isArray(db.progress[w.id]?.missDates)?db.progress[w.id].missDates.filter(t=>t>=cutoff).length:0;
+ return words.filter(difficult).sort((a,b)=>recent(b)-recent(a)||(db.progress[b.id].updated||0)-(db.progress[a.id].updated||0)).slice(0,5);
+}
 function reconcileStudySession(){
  if(!session||!Array.isArray(session.items)||!session.items.length)return;
  const lookup=new Map(db.words.map(w=>[w.id,w]));
@@ -154,7 +185,7 @@ function reconcileStudySession(){
  const oldIndex=session.index;
  const filtered=session.items.filter((id,i)=>{
   const w=lookup.get(id);
-  const keep=!!w&&(mode!=='weak'||isWeakUnmastered(w))&&(activeSubject==='ALL'||getSubjects(w).includes(activeSubject));
+  const keep=!!w&&(mode!=='weak'||isWeakUnmastered(w))&&(mode!=='top5'||difficult(w))&&(mode!=='cloze'||cloze(w))&&(mode!=='source'||values(w,'sources').includes(sourcePage))&&(activeSubject==='ALL'||getSubjects(w).includes(activeSubject));
   if(!keep&&i<oldIndex)removedBefore++;
   return keep;
  });
@@ -177,10 +208,13 @@ function statHtml(){
  return `<section class="stats" aria-label="科目別学習状況"><div class="stat"><div class="k">登録単語</div><div class="v">${r.total}<small style="font-size:12px;margin-left:2px;color:#8190a3">語</small></div><div class="sub">${activeSubject==='ALL'?'全科目のユニーク語':activeSubject+' の対象語'}</div></div><div class="stat"><div class="k">覚えた単語</div><div class="v">${r.known}<small style="font-size:12px;color:#8190a3"> / ${r.total}</small></div><div class="sub">最後の判定が「覚えた」</div></div><div class="stat"><div class="k">復習期限が来た語</div><div class="v">${r.due}</div><div class="sub">現在の対象科目</div></div><div class="stat"><div class="k">苦手・重点（未習得）</div><div class="v">${r.weak}</div><div class="sub">優先して出題</div></div></section>`;
 }
 function makeQueue(){
- let arr=visibleWords();const prog=w=>db.progress[w.id];
+ let arr=[...visibleWords()];const prog=w=>db.progress[w.id];
  if(mode==='new')arr=arr.filter(w=>!prog(w));
  else if(mode==='due')arr=arr.filter(isDue);
  else if(mode==='weak')arr=arr.filter(isWeakUnmastered);
+ else if(mode==='top5')arr=topFive(arr);
+ else if(mode==='cloze')arr=arr.filter(cloze);
+ else if(mode==='source')arr=arr.filter(w=>values(w,'sources').includes(sourcePage));
  else if(mode==='account')arr=arr.filter(w=>w.section==='勘定科目');
  else if(mode==='process')arr=arr.filter(w=>w.section==='会計処理');
  else if(mode==='basic')arr=arr.filter(w=>w.section==='基本用語');
@@ -198,13 +232,13 @@ try{
  const savedContexts=JSON.parse(localStorage.getItem(STUDY_CONTEXTS_KEY)||'{}');
  if(savedContexts&&typeof savedContexts==='object'&&!Array.isArray(savedContexts)){
   for(const [k,v] of Object.entries(savedContexts)){
-   if(/^(ALL|FAR|REG|AUD|TCP)\|(priority|new|due|weak|basic|account|process|all)$/.test(k)&&v&&Array.isArray(v.items))studyContexts[k]=v;
+   if(/^(ALL|FAR|REG|AUD|TCP)\|(priority|new|due|weak|basic|account|process|all|top5|cloze|source\|.+)$/.test(k)&&v&&Array.isArray(v.items))studyContexts[k]=v;
   }
  }
 }catch(e){}
-function studyContextKey(subject=activeSubject,studyMode=mode){return subject+'|'+studyMode}
+function studyContextKey(subject=activeSubject,studyMode=mode){return subject+'|'+studyMode+(studyMode==='source'?'|'+sourcePage:'')}
 function studySnapshot(){
- return {items:session.items.slice(),index:session.index,done:session.done,flipped:!!session.flipped,mode,direction,subject:activeSubject};
+ return {items:session.items.slice(),index:session.index,done:session.done,flipped:!!session.flipped,mode,sourcePage,direction,subject:activeSubject};
 }
 function saveStudySession(){
  if(!session||!Array.isArray(session.items))return;
@@ -230,18 +264,19 @@ function restoreStudySession(){
   if(!raw)return false;
   const record=JSON.parse(raw);
   if(!record||!Array.isArray(record.items))return false;
-  if(['priority','new','due','weak','basic','account','process','all'].includes(record.mode))mode=record.mode;
+  if(['priority','new','due','weak','basic','account','process','all','top5','cloze','source'].includes(record.mode))mode=record.mode;
   if(['ALL','FAR','REG','AUD','TCP'].includes(record.subject))activeSubject=record.subject;
   if(['en-ja','ja-en'].includes(record.direction))direction=record.direction;
+  sourcePage=typeof record.sourcePage==='string'?record.sourcePage:'';
   if(!applySavedStudySession(record))return false;
   studyContexts[studyContextKey()]=studySnapshot();
   return true;
  }catch(e){return false}
 }
-function switchStudyContext(subject=activeSubject,studyMode=mode){
- if(subject===activeSubject&&studyMode===mode){saveStudySession();return}
+function switchStudyContext(subject=activeSubject,studyMode=mode,page=sourcePage){
+ if(subject===activeSubject&&studyMode===mode&&page===sourcePage){saveStudySession();return}
  saveStudySession();
- activeSubject=subject;mode=studyMode;
+ activeSubject=subject;mode=studyMode;sourcePage=page;
  const saved=studyContexts[studyContextKey()];
  if(!applySavedStudySession(saved)){
   session={items:makeQueue(),index:0,done:0,flipped:false};
@@ -258,16 +293,16 @@ function learnedSummary(){
 function resumeStudyPanel(){
  if(!session||!Array.isArray(session.items)||!session.items.length||session.index>=session.items.length)return '';
  const current=session.index+1,total=session.items.length;
- const types={weak:'苦手だけ',due:'復習期限',priority:'おまかせ',new:'未学習',all:'全単語',basic:'基本用語',account:'勘定科目',process:'簿記一巡'};
- return '<div class="resume-study-bar"><div><strong>学習の続きがあります</strong><small>'+esc(types[mode]||'学習')+' ・ '+current+' / '+total+'枚目（前回の位置を保存中）</small></div><button type="button" id="resume-study">続きから再開 →</button></div>';
+ const types={cloze:'例文穴埋め',source:sourcePage,top5:'苦手5語',weak:'苦手だけ',due:'復習期限',priority:'おまかせ',new:'未学習',all:'全単語',basic:'基本用語',account:'勘定科目',process:'簿記一巡'};
+ return '<div class="resume-study-bar"><div><strong>学習の続きがあります</strong><small>'+esc(types[mode]||'学習')+' ・ '+current+' / '+total+'枚目（前回の位置を保存中）</small></div><button type="button" id="resume-study">'+(mode==='cloze'&&!session.flipped?'穴埋め':esc(currentWord()?.term||''))+' · '+current+'/'+total+'枚目から再開</button></div>';
 }
 function restart(){session={items:makeQueue(),index:0,done:0,flipped:false};saveStudySession()}
 function currentWord(){return db.words.find(w=>w.id===session.items[session.index])}
-function study(){let w=currentWord();const count=session.items.length,idx=session.index;const percent=count?Math.floor(Math.min(idx,count)/count*100):0;const chip=[['priority','おまかせ'],['new','未学習'],['due','復習期限'],['weak','苦手だけ'],['basic','基本用語'],['account','勘定科目'],['process','簿記一巡'],['all','全単語']];return `${learnedSummary()}<section class="panel"><div class="title-row"><div><div class="eyebrow">FLASHCARD STUDY</div><h2>フラッシュカード</h2></div><button class="btn small secondary" id="restart" type="button">↻ 最初から</button></div><div class="study-controls"><div class="fieldgroup"><label class="field-label" for="studyModeSelect">出題範囲</label><select id="studyModeSelect" class="field">${chip.map(([k,v])=>`<option value="${k}" ${mode===k?'selected':''}>${v}</option>`).join('')}</select></div><div class="fieldgroup"><label class="field-label" for="directionSelect">出題方向</label><select id="directionSelect" class="field"><option value="en-ja" ${direction==='en-ja'?'selected':''}>英語 → 日本語</option><option value="ja-en" ${direction==='ja-en'?'selected':''}>日本語 → 英語</option></select></div></div></section><section class="cardzone">${!w?`<div class="panel" style="margin-top:14px"><div class="empty"><div style="font-size:36px">✓</div><h3>${session.done?'このセットは完了！':'該当する単語がありません'}</h3><p>${session.done?'今回 '+session.done+'語を判定しました。':'苦手な単語は残っていません。ほかの学習範囲にも切り替えられます。'}</p><div style="margin-top:16px"><button type="button" class="btn primary" id="retry">もう一度学習する</button></div></div></div>`:`<div class="learnbar"><span>${idx+1} / ${count} 枚</span><span>${getSubjects(w).join(' / ')} · ${esc(w.section)}　${w.flagged?'★ 重点単語':''}</span></div><div class="meter"><div style="width:${percent}%"></div></div><button type="button" class="flipcard ${session.flipped?'flipped':''}" id="flashcard" aria-label="カードを裏返す" aria-pressed="${!!session.flipped}"><span class="flipper"><span class="face front"><span class="overline">${getSubjects(w).join(' · ')} ・ ${direction==='en-ja'?'ENGLISH':'日本語'}</span><span class="term ${direction==='ja-en'?'smaller':''}">${esc(direction==='en-ja'?w.term:w.ja)}</span><span class="hint">タップして答えを表示</span></span><span class="face back"><span class="overline">${direction==='en-ja'?'日本語':'ENGLISH'}</span><span class="answer">${esc(direction==='en-ja'?w.ja:w.term)}</span><span class="note">${esc(w.note||'')}</span><span class="example">${esc(w.example||'')}${w.translation?'<em>'+esc(w.translation)+'</em>':''}</span><span class="hint">もう一度タップして表に戻る</span></span></span></button>${audioControls(w,true)}<p class="audio-hint">🔊を押すとアメリカ英語で読み上げます。繰り返し再生できます。</p><div class="card-actions"><div id="pre-grade" class="${session.flipped?'hide':''}"><button type="button" class="btn primary full" id="reveal">答えを見る</button></div><div id="grade" class="rating ${session.flipped?'':'hide'}"><button type="button" class="again" data-grade="again">× もう一度</button><button type="button" class="hard" data-grade="hard">△ あやふや</button><button type="button" class="good" data-grade="good">✓ 覚えた</button></div></div><div class="learning-foot"><button class="mini" id="prev" type="button" ${idx===0?'disabled':''}>← 前のカード</button><button class="mini star" id="toggle-star" type="button">${w.flagged?'★ 重点解除':'☆ 重点に追加'}</button><button class="mini" id="skip" type="button">スキップ →</button></div><div class="explainer">カードをめくってもスクロール位置は変わりません。判定すると次のカードへ進み、復習タイミングを記録します。</div>`}</section>`}
+function study(){let w=currentWord();const count=session.items.length,idx=session.index;const percent=count?Math.floor(Math.min(idx,count)/count*100):0;const chip=[['priority','おまかせ'],['new','未学習'],['due','復習期限'],['weak','苦手だけ'],['top5','苦手5語'],['cloze','例文穴埋め'],...(mode==='source'?[[mode,sourcePage]]:[]),['basic','基本用語'],['account','勘定科目'],['process','簿記一巡'],['all','全単語']];return `${learnedSummary()}<section class="panel"><h2>今日の復習</h2>${resumeStudyPanel()}<div class="btnrow"><button class="btn primary" data-quick="due">${activeSubject==='ALL'?'全科目':activeSubject} · 期限が来た ${visibleWords().filter(isDue).length}語</button><button class="btn secondary" data-quick="top5">苦手5語（${topFive(visibleWords()).length}語）</button><button class="btn secondary" data-mode="cloze">例文穴埋め</button></div><small>苦手5語は直近30日の「もう一度」「あやふや」が多い順。</small></section><section class="panel"><div class="title-row"><div><div class="eyebrow">FLASHCARD STUDY</div><h2>フラッシュカード</h2></div><button class="btn small secondary" id="restart" type="button">↻ 最初から</button></div><div class="study-controls"><div class="fieldgroup"><label class="field-label" for="studyModeSelect">出題範囲</label><select id="studyModeSelect" class="field">${chip.map(([k,v])=>`<option value="${k}" ${mode===k?'selected':''}>${v}</option>`).join('')}</select></div><div class="fieldgroup"><label class="field-label" for="directionSelect">出題方向</label><select id="directionSelect" class="field" ${mode==='cloze'?'disabled':''}><option value="en-ja" ${direction==='en-ja'?'selected':''}>英語 → 日本語</option><option value="ja-en" ${direction==='ja-en'?'selected':''}>日本語 → 英語</option></select></div></div></section><section class="cardzone">${!w?`<div class="panel" style="margin-top:14px"><div class="empty"><div style="font-size:36px">✓</div><h3>${session.done?'このセットは完了！':'該当する単語がありません'}</h3><p>${session.done?'今回 '+session.done+'語を判定しました。':'この範囲の対象語はありません。出題範囲を切り替えられます。'}</p><div style="margin-top:16px"><button type="button" class="btn primary" id="retry">もう一度学習する</button></div></div></div>`:`<div class="learnbar"><span>${idx+1} / ${count} 枚</span><span>${getSubjects(w).join(' / ')} · ${esc(w.section)}　${w.flagged?'★ 重点単語':''}</span></div><div class="meter"><div style="width:${percent}%"></div></div><button type="button" class="flipcard ${session.flipped?'flipped':''}" id="flashcard" aria-label="カードを裏返す" aria-pressed="${!!session.flipped}"><span class="flipper"><span class="face front"><span class="overline">${getSubjects(w).join(' · ')} ・ ${mode==='cloze'?'例文穴埋め':direction==='en-ja'?'ENGLISH':'日本語'}</span><span class="term ${mode==='cloze'?'cloze-prompt':direction==='ja-en'?'smaller':''}">${esc(mode==='cloze'?cloze(w).prompt:direction==='en-ja'?w.term:w.ja)}</span><span class="hint">タップして答えを表示</span></span><span class="face back"><span class="overline">${mode==='cloze'?'解答':direction==='en-ja'?'日本語':'ENGLISH'}</span><span class="answer">${esc(mode==='cloze'?cloze(w).answer+' · '+w.ja:direction==='en-ja'?w.ja:w.term)}</span><span class="note">${esc(w.note||'')}</span><span class="example">${esc(mode==='cloze'?cloze(w).sample:w.example||'')}${w.translation&&(mode!=='cloze'||cloze(w).sample===w.example)?'<em>'+esc(w.translation)+'</em>':''}</span><span class="hint">もう一度タップして表に戻る</span></span></span></button>${audioControls(w,true)}<p class="audio-hint">🔊を押すとアメリカ英語で読み上げます。繰り返し再生できます。</p><div class="card-actions"><div id="pre-grade" class="${session.flipped?'hide':''}"><button type="button" class="btn primary full" id="reveal">答えを見る</button></div><div id="grade" class="rating ${session.flipped?'':'hide'}"><button type="button" class="again" data-grade="again">× もう一度</button><button type="button" class="hard" data-grade="hard">△ あやふや</button><button type="button" class="good" data-grade="good">✓ 覚えた</button></div></div><div class="learning-foot"><button class="mini" id="prev" type="button" ${idx===0?'disabled':''}>← 前のカード</button><button class="mini star" id="toggle-star" type="button">${w.flagged?'★ 重点解除':'☆ 重点に追加'}</button><button class="mini" id="skip" type="button">スキップ →</button></div>${detailsHtml(w)?`<details class="note-block"><summary>教材の出典・追加した用法</summary>${detailsHtml(w)}</details>`:''}<div class="explainer">カードをめくってもスクロール位置は変わりません。判定すると次のカードへ進み、復習タイミングを記録します。</div>`}</section>`}
 function libraryRows(){
  const key=norm(search);
  const list=visibleWords().filter(w=>{
-  if(key&&![w.term,w.ja,w.note,w.category,w.section,w.example].some(x=>norm(x).includes(key)))return false;
+  if(key&&![w.term,w.ja,w.note,w.category,w.section,w.example,...Object.keys(detailLabels).flatMap(k=>values(w,k))].some(x=>norm(x).includes(key)))return false;
   if(filter==='weak')return isWeakUnmastered(w);
   if(filter==='new')return !db.progress[w.id];
   if(filter==='known')return db.progress[w.id]?.last==='good';
@@ -279,16 +314,20 @@ function libraryRows(){
  const count=list.length;
  const html=list.slice(0,visibleLimit).map(w=>{
   const p=db.progress[w.id];
-  return `<details class="word-row"><summary><span><span class="word-en">${esc(w.term)}</span><span class="word-ja" style="display:block">${esc(w.ja)}</span></span><span class="wordrow-right"><span class="subject-label">${getSubjects(w).join(' / ')}</span><span class="tag ${w.flagged?'weak':''}">${w.flagged?'★ 重点':esc(w.category||'単語')}</span><span style="color:#91a1b6;font-size:18px">⌄</span></span></summary><div class="detail">${audioControls(w)}<div><b>意味・使い方：</b>${esc(w.note||'')}</div>${w.example?`<div class="ex">${esc(w.example)}<small>${esc(w.translation)}</small></div>`:''}<div style="color:#7d8aa0;font-size:12px;margin:9px 0">${esc(w.section)} ／ ${p?'最終判定：'+({again:'もう一度',hard:'あやふや',good:'覚えた'}[p.last]||'学習済み'):'未学習'}</div><div class="btnrow"><button type="button" class="btn small secondary" data-star="${esc(w.id)}">${w.flagged?'★ 重点解除':'☆ 重点に追加'}</button><button type="button" class="btn small outline" data-edit="${esc(w.id)}">編集</button>${w.id.startsWith('custom-')?`<button type="button" class="btn small danger" data-delete="${esc(w.id)}">削除</button>`:''}</div></div></details>`
+  return `<details class="word-row"><summary><span><span class="word-en">${esc(w.term)}</span><span class="word-ja" style="display:block">${esc(w.ja)}</span></span><span class="wordrow-right"><span class="subject-label">${getSubjects(w).join(' / ')}</span><span class="tag ${w.flagged?'weak':''}">${w.flagged?'★ 重点':esc(w.category||'単語')}</span><span style="color:#91a1b6;font-size:18px">⌄</span></span></summary><div class="detail">${audioControls(w)}${detailsHtml(w)}${p?.againCount||p?.hardCount?`<div>もう一度 ${p.againCount||0}回 ／ あやふや ${p.hardCount||0}回</div>`:''}<div><b>意味・使い方：</b>${esc(w.note||'')}</div>${w.example?`<div class="ex">${esc(w.example)}<small>${esc(w.translation)}</small></div>`:''}<div style="color:#7d8aa0;font-size:12px;margin:9px 0">${esc(w.section)} ／ ${p?'最終判定：'+({again:'もう一度',hard:'あやふや',good:'覚えた'}[p.last]||'学習済み'):'未学習'}</div><div class="btnrow"><button type="button" class="btn small secondary" data-star="${esc(w.id)}">${w.flagged?'★ 重点解除':'☆ 重点に追加'}</button><button type="button" class="btn small outline" data-edit="${esc(w.id)}">編集</button>${w.id.startsWith('custom-')?`<button type="button" class="btn small danger" data-delete="${esc(w.id)}">削除</button>`:''}</div></div></details>`
  }).join('');
  return `<div class="countline">${count}語が該当（${activeSubject==='ALL'?'全科目':activeSubject}）</div><div class="word-list">${html||'<div class="empty">この科目の登録語がありません。「AI取込・追加」から教材の単語を追加できます。</div>'}</div>${visibleLimit<count?'<div style="margin-top:14px;text-align:center"><button type="button" class="btn secondary" id="more">さらに表示（残り'+(count-visibleLimit)+'語）</button></div>':''}`
 }
+function sourcePicker(){
+ const pages=[...new Set(visibleWords().flatMap(w=>values(w,'sources')))].sort((a,b)=>a.localeCompare(b,'ja',{numeric:true}));
+ return pages.length?`<label class="field-label" for="review-source">教材ページから復習</label><select id="review-source" class="field"><option value="">出典を選択</option>${pages.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select>`:'';
+}
 function library(){
- return `${statHtml()}<section class="panel"><div class="eyebrow">ALL SUBJECTS · VOCABULARY</div><div class="title-row"><h2>専門英単語帳</h2><span class="subtitle">検索・例文・科目別管理</span></div><div class="fieldgroup"><input class="field" id="search" placeholder="英単語・日本語訳で検索" value="${esc(search)}" autocomplete="off" aria-label="単語を検索"></div><div class="fieldgroup"><select id="filter" class="field" aria-label="学習状況で絞る"><option value="all" ${filter==='all'?'selected':''}>すべての単語</option><option value="weak" ${filter==='weak'?'selected':''}>重点・苦手</option><option value="new" ${filter==='new'?'selected':''}>未学習</option><option value="known" ${filter==='known'?'selected':''}>覚えた単語</option><option value="basic" ${filter==='basic'?'selected':''}>基本用語</option><option value="account" ${filter==='account'?'selected':''}>勘定科目</option><option value="process" ${filter==='process'?'selected':''}>簿記一巡</option></select></div><div id="library-rows">${libraryRows()}</div></section>`
+ return `${statHtml()}<section class="panel"><div class="eyebrow">ALL SUBJECTS · VOCABULARY</div><div class="title-row"><h2>専門英単語帳</h2><span class="subtitle">検索・例文・科目別管理</span></div><div class="fieldgroup"><input class="field" id="search" placeholder="英単語・日本語訳で検索" value="${esc(search)}" autocomplete="off" aria-label="単語を検索"></div><div class="fieldgroup"><select id="filter" class="field" aria-label="学習状況で絞る"><option value="all" ${filter==='all'?'selected':''}>すべての単語</option><option value="weak" ${filter==='weak'?'selected':''}>重点・苦手</option><option value="new" ${filter==='new'?'selected':''}>未学習</option><option value="known" ${filter==='known'?'selected':''}>覚えた単語</option><option value="basic" ${filter==='basic'?'selected':''}>基本用語</option><option value="account" ${filter==='account'?'selected':''}>勘定科目</option><option value="process" ${filter==='process'?'selected':''}>簿記一巡</option></select></div>${sourcePicker()}<div id="library-rows">${libraryRows()}</div></section>`
 }
 const AI_PROMPT = "あなたはUSCPA FAR・REG・AUD・TCPの専門英語講師です。教材写真の英単語・熟語を掲載順に抽出して、JSONだけで出力してください。一般語ではなく試験文脈の意味を優先し、写真にない語を補わず、判読不能箇所は推測しないでください。科目名をsubjectにFAR・REG・AUD・TCPから設定し、複数科目に関連する場合はsubjects配列を使ってください。noteは短い意味、exampleは試験に近い英文、translationはその日本語訳、sectionは論点分類です。\n形式:\n{\"words\":[{\"term\":\"audit evidence\",\"ja\":\"監査証拠\",\"note\":\"監査手続によって入手する証拠\",\"example\":\"The auditor obtained sufficient appropriate audit evidence.\",\"translation\":\"監査人は十分かつ適切な監査証拠を入手した。\",\"subject\":\"AUD\",\"section\":\"監査証拠\"}]}\n例示した語を写真にないのに追加しないでください。1回最大100語。コードフェンス・挨拶は不要です。";
 function aiImportPanel(){
- return `<section class="panel" id="ai-panel"><div class="eyebrow">AI IMPORT · FOUR SUBJECTS</div><div class="title-row"><h2>写真から単語をまとめて登録</h2><span class="tag">FAR / REG / AUD / TCP</span></div><div class="ai-hero"><div style="font-size:13px;font-weight:800;color:#263e69">写真 → ChatGPTで抽出 → 科目を指定して一括登録</div><div class="ai-steps"><div class="ai-step"><b>① 📷</b>教材を<br>写真撮影</div><div class="ai-step"><b>② ✨</b>AIが<br>用語を抽出</div><div class="ai-step"><b>③ ✓</b>科目別に<br>一括登録</div></div><div class="ai-tools"><button type="button" class="btn primary full" id="ai-copy">① AIへの読み取り指示をコピー</button><a class="btn secondary full" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">② ChatGPTを開く ↗</a></div><p class="subtitle" style="margin-top:10px">無料で使える方式です。アプリ自身で写真を直接AI認識する機能はまだありません。</p></div><div class="fieldgroup" style="margin-top:15px"><label class="field-label" for="ai-default-subject">登録先の科目（JSONに科目指定がない場合）</label><select class="field" id="ai-default-subject">${['FAR','REG','AUD','TCP'].map(k=>`<option value="${k}" ${importSubject===k?'selected':''}>${k}</option>`).join('')}</select></div><div class="fieldgroup" style="margin-top:13px"><label class="field-label" for="ai-paste">③ AIで抽出したJSONを貼り付け</label><textarea id="ai-paste" class="field ai-textarea" rows="6" placeholder='{"words":[{"term":"audit evidence","ja":"監査証拠","subject":"AUD"}]}' spellcheck="false">${esc(aiDraft)}</textarea></div><div class="btnrow"><button type="button" class="btn primary" id="ai-parse">④ 読み込み・重複チェック</button><button type="button" class="btn outline" id="ai-file-btn">JSON / CSV を選ぶ</button><input id="ai-file" type="file" accept=".json,.txt,.tsv,.csv,application/json,text/plain,text/csv,text/tab-separated-values" style="display:none"></div><p class="subtitle" style="margin-top:9px">共通する単語は1枚にまとめて関連科目を追加します。元の復習履歴は残ります。</p><div id="ai-feedback"></div><div id="ai-preview">${aiPreviewHtml()}</div></section>`
+ return `<section class="panel" id="ai-panel"><div class="eyebrow">AI IMPORT · FOUR SUBJECTS</div><div class="title-row"><h2>写真から単語をまとめて登録</h2><span class="tag">FAR / REG / AUD / TCP</span></div><div class="ai-hero"><div style="font-size:13px;font-weight:800;color:#263e69">写真 → ChatGPTで抽出 → 科目を指定して一括登録</div><div class="ai-steps"><div class="ai-step"><b>① 📷</b>教材を<br>写真撮影</div><div class="ai-step"><b>② ✨</b>AIが<br>用語を抽出</div><div class="ai-step"><b>③ ✓</b>科目別に<br>一括登録</div></div><div class="ai-tools"><button type="button" class="btn primary full" id="ai-copy">① AIへの読み取り指示をコピー</button><a class="btn secondary full" href="https://chatgpt.com/" target="_blank" rel="noopener noreferrer">② ChatGPTを開く ↗</a></div><p class="subtitle" style="margin-top:10px">無料で使える方式です。アプリ自身で写真を直接AI認識する機能はまだありません。</p></div><div class="fieldgroup" style="margin-top:15px"><label class="field-label" for="ai-default-subject">登録先の科目（JSONに科目指定がない場合）</label><select class="field" id="ai-default-subject">${['FAR','REG','AUD','TCP'].map(k=>`<option value="${k}" ${importSubject===k?'selected':''}>${k}</option>`).join('')}</select></div><div class="fieldgroup" style="margin-top:13px"><label class="field-label">今回の出典（任意・一括）<input class="field" id="batch-source" value="${esc(batchSource)}" maxlength="160" placeholder="FAR I・問題集・p.42"></label><label class="field-label" for="ai-paste">③ AIで抽出したJSONを貼り付け</label><textarea id="ai-paste" class="field ai-textarea" rows="6" placeholder='{"words":[{"term":"audit evidence","ja":"監査証拠","subject":"AUD"}]}' spellcheck="false">${esc(aiDraft)}</textarea></div><div class="btnrow"><button type="button" class="btn primary" id="ai-parse">④ 読み込み・重複チェック</button><button type="button" class="btn outline" id="ai-file-btn">JSON / CSV を選ぶ</button><input id="ai-file" type="file" accept=".json,.txt,.tsv,.csv,application/json,text/plain,text/csv,text/tab-separated-values" style="display:none"></div><p class="subtitle" style="margin-top:9px">共通する単語は1枚にまとめて関連科目を追加します。元の復習履歴は残ります。</p><div id="ai-feedback"></div><div id="ai-preview">${aiPreviewHtml()}</div></section>`
 }
 function aiNormalize(raw){
  let input=String(raw||'').replace(/^\uFEFF/,'').replace(/[\u200B-\u200D\u2060]/g,'').trim();
@@ -402,25 +441,44 @@ function aiConvert(w){
  if(typeof w==='string')return{term:w.trim(),ja:'',note:'',example:'',translation:'',section:'追加した単語',subjects:[importSubject],explicitSubject:false,selected:true};
  const subjectField=w?.subjects??w?.subject??w?.関連科目??w?.科目;
  const explicitSubject=subjectField!==undefined&&subjectField!==null;
- return {term:text('term','en','english','word','front','英単語'),ja:text('ja','japanese','meaning','back','日本語訳'),note:text('note','explanation','description','補足'),example:text('example','sentence','英文例'),translation:text('translation','example_ja','例文訳'),section:(text('section','category','分類')||'追加した単語').slice(0,80),subjects:normalizeSubjects(subjectField,importSubject),explicitSubject,selected:true};
+ return {sources:[...new Set([...values(w,'sources'),text('source','出典')].filter(Boolean))],term:text('term','en','english','word','front','英単語'),ja:text('ja','japanese','meaning','back','日本語訳'),note:text('note','explanation','description','補足'),example:text('example','sentence','英文例'),translation:text('translation','example_ja','例文訳'),section:(text('section','category','分類')||'追加した単語').slice(0,80),subjects:normalizeSubjects(subjectField,importSubject),explicitSubject,selected:true};
+}
+function incomingDetails(w){
+ const example=[w.example,w.translation].filter(Boolean).join('\n');
+ return {meanings:[w.ja],notes:[w.note],examples:w.example?[example]:[],sources:[...new Set([...values(w,'sources'),batchSource.trim()].filter(Boolean))]};
+}
+function differences(current,w){
+ const base={meanings:current.ja,notes:current.note,examples:[current.example,current.translation].filter(Boolean).join('\n')};
+ return Object.entries(incomingDetails(w)).flatMap(([key,incoming])=>incoming.filter(value=>value&&value!==base[key]&&!values(current,key).includes(value)).map(value=>({key,value,old:[base[key],...values(current,key)].filter(Boolean).join(' ／ ')})));
 }
 function aiMeta(){
- const known=new Map(db.words.map(w=>[norm(w.term),new Set(getSubjects(w))]));
- let ready=0,linked=0,dupes=0,invalid=0;
- const status=aiCandidates.map(w=>{
-  const k=norm(w.term),subs=getSubjects(w);
-  if(!k||!String(w.ja||'').trim()||w.term.length>120||w.ja.length>180){invalid++;return 'invalid'}
-  if(!known.has(k)){if(w.selected){known.set(k,new Set(subs));ready++}return 'new'}
-  const current=known.get(k),missing=subs.filter(x=>!current.has(x));
-  if(missing.length){if(w.selected){missing.forEach(x=>current.add(x));linked++}return 'linked'}
-  dupes++;return 'duplicate'
+ const known=new Map(db.words.map(w=>[norm(w.term),{...w}]));
+ const diffs=[];let ready=0,linked=0,dupes=0,invalid=0;
+ const status=aiCandidates.map((w,i)=>{
+  const key=norm(w.term),current=known.get(key);diffs[i]=[];
+  if(!key||!w.ja.trim()||w.term.length>120||w.ja.length>180){invalid++;return 'invalid'}
+  if(!current){if(w.selected){known.set(key,{...w,sources:incomingDetails(w).sources});ready++}return 'new'}
+  const missing=getSubjects(w).filter(k=>!getSubjects(current).includes(k));
+  diffs[i]=differences(current,w);
+  if(!missing.length&&!diffs[i].length){dupes++;return 'duplicate'}
+  if(w.selected){
+   current.subjects=[...getSubjects(current),...missing];
+   const chosen=diffs[i].filter(d=>chosenDetail(w,d));
+   chosen.forEach(d=>appendDetail(current,d.key,d.value));
+   if(missing.length||chosen.length)linked++;
+  }
+  return 'linked';
  });
- return {status,ready,linked,dupes,invalid}
+ return {status,diffs,ready,linked,dupes,invalid};
+}
+function chosenDetail(w,d){return w.choices?.[JSON.stringify([d.key,d.value])]??(d.key==='sources')}
+function diffFields(w,i,diffs){
+ return diffs.map((d,j)=>`<label class="diff-field"><input type="checkbox" data-diff-row="${i}" data-diff-item="${j}" ${chosenDetail(w,d)?'checked':''}><span><b>${detailLabels[d.key]}を追加</b><small>既存　${esc(d.old||'未登録')}</small><small>今回　${esc(d.value)}</small></span></label>`).join('');
 }
 function aiPreviewHtml(){
  if(!aiCandidates.length)return '';
  const m=aiMeta();const total=m.ready+m.linked;
- return `<div style="margin-top:19px;border-top:1px solid #e3eaf4;padding-top:16px"><div class="title-row"><h2>登録前の確認</h2><button type="button" class="btn small secondary" id="ai-clear">やり直す</button></div><div class="ai-summary"><span class="ai-count">抽出 ${aiCandidates.length}語</span><span class="ai-count eligible">新規 ${m.ready}語</span><span class="ai-count eligible">科目追加 ${m.linked}件</span><span class="ai-count dupe">重複 ${m.dupes}件</span>${m.invalid?`<span class="ai-count">要確認 ${m.invalid}語</span>`:''}</div><p class="subtitle">英単語・日本語訳・関連科目を確認してください。複数科目の用語には同じカードを使用します。</p><div class="ai-preview-list">${aiCandidates.map((w,i)=>{const st=m.status[i],disabled=st==='duplicate'||st==='invalid';return `<div class="ai-preview-row"><div class="ai-row-head"><label class="ai-check"><input type="checkbox" aria-label="${i+1}番を登録する" data-ai-index="${i}" data-ai-field="selected" ${w.selected&&!disabled?'checked':''} ${disabled?'disabled':''}><span>${i+1}番の単語</span></label><span class="tag ${disabled?'weak':''}">${({new:'新規',linked:'科目追加',duplicate:'登録済み',invalid:'要確認'})[st]}</span></div><div class="ai-row-fields"><label>英単語<input class="field" data-ai-index="${i}" data-ai-field="term" value="${esc(w.term)}" maxlength="120"></label><label>日本語訳<input class="field" data-ai-index="${i}" data-ai-field="ja" value="${esc(w.ja)}" maxlength="180"></label></div><div class="fieldgroup" style="margin-top:8px"><label class="field-label">関連科目</label><div class="subject-checks">${['FAR','REG','AUD','TCP'].map(k=>`<label><input type="checkbox" data-ai-index="${i}" data-ai-subject="${k}" ${getSubjects(w).includes(k)?'checked':''}> ${k}</label>`).join('')}</div></div><details style="margin-top:7px"><summary style="font-size:12px;color:#657996">補足・英文例・訳を編集</summary><div class="ai-row-note"><label class="field-label">補足<input class="field" data-ai-index="${i}" data-ai-field="note" value="${esc(w.note)}" maxlength="250"></label><label class="field-label">英文例<input class="field" data-ai-index="${i}" data-ai-field="example" value="${esc(w.example)}" maxlength="280"></label><label class="field-label">例文訳<input class="field" data-ai-index="${i}" data-ai-field="translation" value="${esc(w.translation)}" maxlength="280"></label></div></details></div>`}).join('')}</div><div class="ai-import-actions"><button type="button" class="btn success" id="ai-save" ${total?'':'disabled'}>✓ ${total}件をまとめて登録</button></div><p class="subtitle" style="margin-top:9px">同じ単語の追加では元の意味と復習履歴を変更せず、科目タグだけを増やします。</p></div>`
+ return `<div style="margin-top:19px;border-top:1px solid #e3eaf4;padding-top:16px"><div class="title-row"><h2>登録前の確認</h2><button type="button" class="btn small secondary" id="ai-clear">やり直す</button></div><div class="ai-summary"><span class="ai-count">抽出 ${aiCandidates.length}語</span><span class="ai-count eligible">新規 ${m.ready}語</span><span class="ai-count eligible">既存カード更新 ${m.linked}件</span><span class="ai-count dupe">重複 ${m.dupes}件</span>${m.invalid?`<span class="ai-count">要確認 ${m.invalid}語</span>`:''}</div><p class="subtitle">英単語・日本語訳・関連科目を確認してください。複数科目の用語には同じカードを使用します。</p><div class="ai-preview-list">${aiCandidates.map((w,i)=>{const st=m.status[i],disabled=st==='duplicate'||st==='invalid';return `<div class="ai-preview-row"><div class="ai-row-head"><label class="ai-check"><input type="checkbox" aria-label="${i+1}番を登録する" data-ai-index="${i}" data-ai-field="selected" ${w.selected&&!disabled?'checked':''} ${disabled?'disabled':''}><span>${i+1}番の単語</span></label><span class="tag ${disabled?'weak':''}">${({new:'新規',linked:'既存カード',duplicate:'登録済み',invalid:'要確認'})[st]}</span></div><div class="ai-row-fields"><label>英単語<input class="field" data-ai-index="${i}" data-ai-field="term" value="${esc(w.term)}" maxlength="120"></label><label>日本語訳<input class="field" data-ai-index="${i}" data-ai-field="ja" value="${esc(w.ja)}" maxlength="180"></label></div><div class="fieldgroup" style="margin-top:8px"><label class="field-label">関連科目</label><div class="subject-checks">${['FAR','REG','AUD','TCP'].map(k=>`<label><input type="checkbox" data-ai-index="${i}" data-ai-subject="${k}" ${getSubjects(w).includes(k)?'checked':''}> ${k}</label>`).join('')}</div></div>${diffFields(w,i,m.diffs[i])}<details style="margin-top:7px"><summary style="font-size:12px;color:#657996">補足・英文例・訳を編集</summary><div class="ai-row-note"><label class="field-label">補足<input class="field" data-ai-index="${i}" data-ai-field="note" value="${esc(w.note)}" maxlength="250"></label><label class="field-label">英文例<input class="field" data-ai-index="${i}" data-ai-field="example" value="${esc(w.example)}" maxlength="280"></label><label class="field-label">例文訳<input class="field" data-ai-index="${i}" data-ai-field="translation" value="${esc(w.translation)}" maxlength="280"></label></div></details></div>`}).join('')}</div><div class="ai-import-actions"><button type="button" class="btn success" id="ai-save" ${total?'':'disabled'}>✓ ${total}件をまとめて登録</button></div><p class="subtitle" style="margin-top:9px">既存カードにはチェックした内容を追記します。出典は初期選択です。</p></div>`
 }
 function aiPreviewRefresh(){const node=$('ai-preview');if(node)node.innerHTML=aiPreviewHtml()}
 function aiParse(raw){
@@ -442,18 +500,20 @@ function aiSave(){
   if(existing){
    const before=new Set(getSubjects(existing));
    subs.forEach(x=>before.add(x));
-   existing.subjects=[...before];linked++;
+   const chosen=m.diffs[i].filter(d=>chosenDetail(w,d));
+   if(before.size===getSubjects(existing).length&&!chosen.length)return;
+   existing.subjects=[...before];chosen.forEach(d=>appendDetail(existing,d.key,d.value));linked++;
   }else{
-   db.words.push({id:'custom-'+Date.now()+'-'+i+'-'+Math.random().toString(36).slice(2,8),term:w.term.trim(),ja:w.ja.trim(),note:w.note.trim(),example:w.example.trim(),translation:w.translation.trim(),section:w.section,category:'追加',subjects:subs,flagged:false});added++;
+   db.words.push({id:'custom-'+Date.now()+'-'+i+'-'+Math.random().toString(36).slice(2,8),sources:incomingDetails(w).sources,term:w.term.trim(),ja:w.ja.trim(),note:w.note.trim(),example:w.example.trim(),translation:w.translation.trim(),section:w.section,category:'追加',subjects:subs,flagged:false});added++;
   }
  });
  if(!added&&!linked)return toast('追加できる単語・科目がありません',true);
- save();saveStudySession();aiCandidates=[];aiDraft='';render();toast('新規 '+added+'語、科目追加 '+linked+'件／合計 '+db.words.length+'語');
+ save();saveStudySession();aiCandidates=[];aiDraft='';batchSource='';render();toast('新規 '+added+'語、既存カード更新 '+linked+'件／合計 '+db.words.length+'語');
 }
 async function aiFile(file){try{if(file.size>1500000)throw Error('ファイルは1.5MB以内にしてください');const raw=await file.text();aiDraft=raw;const f=$('ai-paste');if(f)f.value=raw;aiParse(raw)}catch(e){toast(e.message,true)}}
 async function copyAI(){try{await navigator.clipboard.writeText(AI_PROMPT+"\n今回の優先科目："+importSubject);toast('AI用の指示をコピーしました。写真と一緒にChatGPTへ送ってください')}catch(e){try{const t=document.createElement('textarea');t.value=AI_PROMPT+"\n今回の優先科目："+importSubject;t.style.position='fixed';t.style.opacity='0';document.body.appendChild(t);t.select();const ok=document.execCommand('copy');t.remove();if(!ok)throw Error('copy fail');toast('読み取り指示をコピーしました')}catch(err){toast('コピーできませんでした。ブラウザーから開いて試してください',true)}}}
 
-function addPage(){const w=db.words.find(x=>x.id===editingId)||{};return `${editingId?'':aiImportPanel()}<section class="panel"><div class="eyebrow">ADD / EDIT</div><div class="title-row"><h2>${editingId?'単語を編集':'新しい単語を追加'}</h2>${editingId?'<button type="button" id="cancel-edit" class="btn small secondary">編集をやめる</button>':''}</div><p class="subtitle" style="margin-bottom:20px">写真から抽出した英単語も、このフォームに登録できます。同じ英語表記は重複登録しません。</p><form id="wordform"><div class="grid2"><div class="fieldgroup"><label class="field-label" for="term">英単語・熟語 *</label><input required class="field" id="term" maxlength="120" placeholder="例：accrued expense" value="${esc(w.term||'')}"></div><div class="fieldgroup"><label class="field-label" for="ja">日本語訳 *</label><input required class="field" id="ja" maxlength="180" placeholder="例：未払費用" value="${esc(w.ja||'')}"></div></div><div class="fieldgroup"><label class="field-label" for="note">USCPAでの意味・補足</label><input class="field" id="note" maxlength="250" placeholder="覚えるポイントを短く" value="${esc(w.note||'')}"></div><div class="fieldgroup"><label class="field-label" for="example">英文例</label><input class="field" id="example" maxlength="280" placeholder="The entity accrued interest." value="${esc(w.example||'')}"></div><div class="fieldgroup"><label class="field-label" for="translation">例文の日本語訳</label><input class="field" id="translation" maxlength="280" placeholder="企業は利息を未払計上した。" value="${esc(w.translation||'')}"></div><div class="fieldgroup"><label class="field-label">関連科目（複数選択できます）</label><div class="subject-checks">${['FAR','REG','AUD','TCP'].map(k=>`<label><input type="checkbox" name="manual-subject" value="${k}" ${(editingId?getSubjects(w):[importSubject]).includes(k)?'checked':''}> ${k}</label>`).join('')}</div></div><div class="fieldgroup"><label class="field-label" for="section">分類</label><input class="field" id="section" maxlength="80" placeholder="例：法人税 / 監査証拠 / 棚卸資産" value="${esc(w.section||'追加した単語')}"></div><button class="btn primary full" type="submit">${editingId?'変更を保存':'単語を登録'}</button></form><div id="add-feedback"></div></section><section class="panel"><div class="title-row"><div><div class="eyebrow">BULK IMPORT</div><h2>複数語をまとめて追加</h2></div></div><p class="subtitle">1行につき「英単語 ↹ 日本語訳 ↹ 補足」の順にタブ区切り。登録科目は上のAI取込欄で選択した科目です。</p><div class="fieldgroup" style="margin-top:13px"><textarea class="field" id="bulk" rows="6" placeholder="accrued expense&#9;未払費用&#9;当期発生、次期支払い\nprepaid expense&#9;前払費用&#9;支払い済みの未経過分"></textarea></div><button type="button" class="btn secondary" id="bulk-add">まとめて登録</button><div id="bulk-feedback"></div></section>`}
+function addPage(){const w=db.words.find(x=>x.id===editingId)||{};return `${editingId?'':aiImportPanel()}<section class="panel"><div class="eyebrow">ADD / EDIT</div><div class="title-row"><h2>${editingId?'単語を編集':'新しい単語を追加'}</h2>${editingId?'<button type="button" id="cancel-edit" class="btn small secondary">編集をやめる</button>':''}</div><p class="subtitle" style="margin-bottom:20px">写真から抽出した英単語も、このフォームに登録できます。同じ英語表記は重複登録しません。</p><form id="wordform"><label class="field-label">出典（1行に1件）<textarea class="field" id="manual-sources" rows="2" placeholder="FAR I・問題集・p.42">${esc(values(w,'sources').join('\n'))}</textarea></label><div class="grid2"><div class="fieldgroup"><label class="field-label" for="term">英単語・熟語 *</label><input required class="field" id="term" maxlength="120" placeholder="例：accrued expense" value="${esc(w.term||'')}"></div><div class="fieldgroup"><label class="field-label" for="ja">日本語訳 *</label><input required class="field" id="ja" maxlength="180" placeholder="例：未払費用" value="${esc(w.ja||'')}"></div></div><div class="fieldgroup"><label class="field-label" for="note">USCPAでの意味・補足</label><input class="field" id="note" maxlength="250" placeholder="覚えるポイントを短く" value="${esc(w.note||'')}"></div><div class="fieldgroup"><label class="field-label" for="example">英文例</label><input class="field" id="example" maxlength="280" placeholder="The entity accrued interest." value="${esc(w.example||'')}"></div><div class="fieldgroup"><label class="field-label" for="translation">例文の日本語訳</label><input class="field" id="translation" maxlength="280" placeholder="企業は利息を未払計上した。" value="${esc(w.translation||'')}"></div><div class="fieldgroup"><label class="field-label">関連科目（複数選択できます）</label><div class="subject-checks">${['FAR','REG','AUD','TCP'].map(k=>`<label><input type="checkbox" name="manual-subject" value="${k}" ${(editingId?getSubjects(w):[importSubject]).includes(k)?'checked':''}> ${k}</label>`).join('')}</div></div><div class="fieldgroup"><label class="field-label" for="section">分類</label><input class="field" id="section" maxlength="80" placeholder="例：法人税 / 監査証拠 / 棚卸資産" value="${esc(w.section||'追加した単語')}"></div><button class="btn primary full" type="submit">${editingId?'変更を保存':'単語を登録'}</button></form><div id="add-feedback"></div></section><section class="panel"><div class="title-row"><div><div class="eyebrow">BULK IMPORT</div><h2>複数語をまとめて追加</h2></div></div><p class="subtitle">1行につき「英単語 ↹ 日本語訳 ↹ 補足」の順にタブ区切り。登録科目は上のAI取込欄で選択した科目です。</p><div class="fieldgroup" style="margin-top:13px"><textarea class="field" id="bulk" rows="6" placeholder="accrued expense&#9;未払費用&#9;当期発生、次期支払い\nprepaid expense&#9;前払費用&#9;支払い済みの未経過分"></textarea></div><button type="button" class="btn secondary" id="bulk-add">まとめて登録</button><div id="bulk-feedback"></div></section>`}
 function progressPage(){
  const all=['FAR','REG','AUD','TCP'];
  const r=summary();
@@ -530,7 +590,10 @@ function speakEnglish(input){
 
 function flip(){let card=$('flashcard');if(!card)return;let on=card.classList.toggle('flipped');card.setAttribute('aria-pressed',String(on));$('pre-grade').classList.toggle('hide',on);$('grade').classList.toggle('hide',!on);session.flipped=on;saveStudySession()}
 function next(){session.index++;session.flipped=false;saveStudySession();render()}
-function grade(r){const w=currentWord();if(!w)return;const p=db.progress[w.id]||{reps:0,interval:0};let interval=0;if(r==='again'){p.reps=0;p.interval=0;p.due=Date.now()+10*60*1000}else if(r==='hard'){p.reps=Math.max(0,p.reps);p.interval=1;p.due=Date.now()+24*60*60*1000}else{p.reps=(p.reps||0)+1;interval=p.reps===1?3:p.reps===2?7:Math.round(Math.max(7,(p.interval||7)*2.2));p.interval=interval;p.due=Date.now()+interval*24*60*60*1000}p.last=r;p.updated=Date.now();db.progress[w.id]=p;save();session.done++;next()}
+function grade(r){const w=currentWord();if(!w)return;const p=db.progress[w.id]||{reps:0,interval:0};if(r==='again'||r==='hard'){
+ p[r+'Count']=(Number(p[r+'Count'])||0)+1;
+ const now=Date.now();p.missDates=[...(Array.isArray(p.missDates)?p.missDates:[]).filter(t=>t>=now-30*86400000),now];
+ }let interval=0;if(r==='again'){p.reps=0;p.interval=0;p.due=Date.now()+10*60*1000}else if(r==='hard'){p.reps=Math.max(0,p.reps);p.interval=1;p.due=Date.now()+24*60*60*1000}else{p.reps=(p.reps||0)+1;interval=p.reps===1?3:p.reps===2?7:Math.round(Math.max(7,(p.interval||7)*2.2));p.interval=interval;p.due=Date.now()+interval*24*60*60*1000}p.last=r;p.updated=Date.now();db.progress[w.id]=p;save();session.done++;next()}
 function updateLibrary(){const n=$('library-rows');if(n)n.innerHTML=libraryRows()}
 function wordSave(e){
  e.preventDefault();
@@ -540,7 +603,7 @@ function wordSave(e){
  if(!subjects.length)return toast('関連科目を1つ以上選択してください',true);
  const dup=db.words.find(w=>norm(w.term)===norm(term)&&w.id!==editingId);
  if(dup)return toast('登録済みです。単語帳の「編集」から科目を追加できます',true);
- const data={term,ja,note:$('note').value.trim(),example:$('example').value.trim(),translation:$('translation').value.trim(),section:$('section').value.trim()||'追加した単語',category:'追加',subjects,flagged:false};
+ const data={term,ja,sources:[...new Set($('manual-sources').value.split(/\r?\n/).map(v=>v.trim()).filter(Boolean))],note:$('note').value.trim(),example:$('example').value.trim(),translation:$('translation').value.trim(),section:$('section').value.trim()||'追加した単語',category:'追加',subjects,flagged:false};
  if(editingId){const idx=db.words.findIndex(w=>w.id===editingId);if(idx>=0)db.words[idx]={...db.words[idx],...data,flagged:db.words[idx].flagged}}
  else db.words.push({id:'custom-'+Date.now()+'-'+Math.random().toString(36).slice(2,7),...data});
  save();editingId=null;saveStudySession();render();toast('単語を保存しました');
@@ -565,12 +628,13 @@ function mergeWordlabBackup(current,incoming){
  const canon=s=>String(s||'').trim().toLocaleLowerCase('en-US').replace(/\s+/g,' ');
  const byTerm=new Map(next.words.map(w=>[canon(w.term),w]));
  const ids=new Set(next.words.map(w=>w.id));
- let added=0,dupes=0,updated=0,flagged=0,subjectChanges=0;
+ let detailsChanged=0,added=0,dupes=0,updated=0,flagged=0,subjectChanges=0;
  incoming.words.forEach((w,i)=>{
   if(!w||typeof w.term!=='string'||!w.term.trim()||typeof w.ja!=='string'||!w.ja.trim())throw Error('英単語か日本語訳が欠けています。取込を中止しました。');
   const k=canon(w.term),previous=byTerm.get(k);let targetId;
   if(previous){
    dupes++;targetId=previous.id;
+   for(const key of Object.keys(detailLabels))for(const value of values(w,key))if(appendDetail(previous,key,value))detailsChanged++;
    if(w.flagged&&!previous.flagged){previous.flagged=true;flagged++}
    const oldSubjects=getSubjects(previous),newSubjects=[...new Set([...oldSubjects,...getSubjects(w)])];
    if(newSubjects.length>oldSubjects.length){previous.subjects=newSubjects;subjectChanges++}
@@ -578,6 +642,7 @@ function mergeWordlabBackup(current,incoming){
    let id=typeof w.id==='string'&&w.id&&!ids.has(w.id)?w.id:'custom-sync-'+Date.now()+'-'+i;
    while(ids.has(id))id+='x';
    const fresh={id,term:w.term.trim(),ja:w.ja.trim(),note:String(w.note||''),example:String(w.example||''),translation:String(w.translation||''),section:String(w.section||'追加した単語'),category:String(w.category||'追加'),flagged:!!w.flagged,subjects:getSubjects(w)};
+   for(const key of Object.keys(detailLabels))for(const value of values(w,key))appendDetail(fresh,key,value);
    next.words.push(fresh);byTerm.set(k,fresh);ids.add(id);targetId=id;added++;
   }
   const from=incoming.progress[w.id];
@@ -586,7 +651,7 @@ function mergeWordlabBackup(current,incoming){
    if(!existing||Number(from.updated||0)>Number(existing.updated||0)){next.progress[targetId]=JSON.parse(JSON.stringify(from));updated++}
   }
  });
- return {data:next,added,dupes,updated,flagged,subjectChanges};
+ return {data:next,detailsChanged,added,dupes,updated,flagged,subjectChanges};
 }
 function syncBackupText(){return JSON.stringify({app:'uscpa-wordlab',version:1,exportedAt:new Date().toISOString(),words:db.words,progress:db.progress})}
 async function syncCopy(){
@@ -609,8 +674,8 @@ function syncMerge(){
   if(raw.length>3000000)throw Error('データが大きすぎます');
   const incoming=JSON.parse(raw);
   const merged=mergeWordlabBackup(db,incoming);
-  if(!merged.added&&!merged.updated&&!merged.flagged&&!merged.subjectChanges){const msg=$('sync-feedback');if(msg)msg.textContent='引き継ぐ新しい単語・科目・復習記録はありませんでした。';return}
-  if(!confirm('新規 '+merged.added+'語、科目更新 '+merged.subjectChanges+'件、復習記録 '+merged.updated+'件を統合しますか？'))return;
+  if(!merged.added&&!merged.updated&&!merged.flagged&&!merged.subjectChanges&&!merged.detailsChanged){const msg=$('sync-feedback');if(msg)msg.textContent='引き継ぐ新しい単語・科目・復習記録はありませんでした。';return}
+  if(!confirm('新規 '+merged.added+'語、科目更新 '+merged.subjectChanges+'件、出典・用法 '+merged.detailsChanged+'件、復習記録 '+merged.updated+'件を統合しますか？'))return;
   db=merged.data;save();saveStudySession();render(false);toast('引き継ぎ完了／合計'+db.words.length+'語');
  }catch(e){const box=$('sync-feedback');if(box)box.textContent='取込できません：'+e.message;toast('取込に失敗しました',true)}
 }
@@ -618,15 +683,25 @@ function exportData(){let data={app:'uscpa-wordlab',version:1,exportedAt:new Dat
 function importData(file){
  return file.text().then(content=>{
   const incoming=JSON.parse(content);const merged=mergeWordlabBackup(db,incoming);
-  if(!merged.added&&!merged.updated&&!merged.flagged&&!merged.subjectChanges)return toast('追加・更新する単語や復習履歴はありませんでした');
-  if(!confirm('新規 '+merged.added+'語、科目更新 '+merged.subjectChanges+'件、復習記録 '+merged.updated+'件を統合しますか？ 現在のデータは削除しません。'))return;
+  if(!merged.added&&!merged.updated&&!merged.flagged&&!merged.subjectChanges&&!merged.detailsChanged)return toast('追加・更新する単語や復習履歴はありませんでした');
+  if(!confirm('新規 '+merged.added+'語、科目更新 '+merged.subjectChanges+'件、出典・用法 '+merged.detailsChanged+'件、復習記録 '+merged.updated+'件を統合しますか？ 現在のデータは削除しません。'))return;
   db=merged.data;save();saveStudySession();render();toast('データを統合しました。合計'+db.words.length+'語');
  }).catch(e=>toast('読込失敗：'+e.message,true));
 }
 // Delegation: study controls only alter the card, not browser location/hash or scroll.
-document.addEventListener('click',e=>{const pronunciation=e.target.closest('[data-speak-word],[data-speak-example]');if(pronunciation){e.preventDefault();e.stopPropagation();const key=pronunciation.dataset.speakWord||pronunciation.dataset.speakExample;const entry=db.words.find(w=>w.id===key);if(entry)speakEnglish(pronunciation.hasAttribute('data-speak-example')?entry.example:entry.term);return}if(e.target.closest('#resume-study')){tab='study';render(false);window.scrollTo(0,0);return}const subjectButton=e.target.closest('[data-subject]');if(subjectButton){switchStudyContext(subjectButton.dataset.subject,mode);importSubject=activeSubject==='ALL'?'FAR':activeSubject;render(false);return}const nav=e.target.closest('[data-nav]');if(nav){saveStudySession();tab=nav.dataset.nav;editingId=null;render(false);window.scrollTo(0,0);return}const modeBtn=e.target.closest('[data-mode]');if(modeBtn){switchStudyContext(activeSubject,modeBtn.dataset.mode);render();return}const dirBtn=e.target.closest('[data-direction]');if(dirBtn){direction=dirBtn.dataset.direction;saveStudySession();render();return}if(e.target.closest('#flashcard')||e.target.closest('#reveal')){flip();return}const rating=e.target.closest('[data-grade]');if(rating){grade(rating.dataset.grade);return}if(e.target.closest('#skip')){next();return}if(e.target.closest('#prev')){session.index=Math.max(0,session.index-1);session.flipped=false;saveStudySession();render();return}if(e.target.closest('#restart')||e.target.closest('#retry')){restart();render();return}if(e.target.closest('#toggle-star')){const w=currentWord();if(w){w.flagged=!w.flagged;save();render();toast(w.flagged?'重点単語に追加':'重点設定を解除')}return}const star=e.target.closest('[data-star]');if(star){const w=db.words.find(x=>x.id===star.dataset.star);if(w){w.flagged=!w.flagged;save();updateLibrary()}return}const edit=e.target.closest('[data-edit]');if(edit){editingId=edit.dataset.edit;tab='add';render(false);window.scrollTo(0,0);return}const del=e.target.closest('[data-delete]');if(del){const w=db.words.find(x=>x.id===del.dataset.delete);if(w?.id.startsWith('custom-')&&confirm('この単語を削除しますか？')){db.words=db.words.filter(x=>x.id!==w.id);delete db.progress[w.id];save();reconcileStudySession();saveStudySession();renderSubjectBar();updateLibrary()}return}if(e.target.closest('#more')){visibleLimit+=50;updateLibrary();return}if(e.target.closest('#cancel-edit')){editingId=null;render();return}if(e.target.closest('#ai-copy')){copyAI();return}if(e.target.closest('#ai-file-btn')){$('ai-file')?.click();return}if(e.target.closest('#ai-parse')){aiDraft=$('ai-paste').value;aiParse(aiDraft);return}if(e.target.closest('#ai-clear')){aiCandidates=[];aiDraft='';if($('ai-paste'))$('ai-paste').value='';if($('ai-feedback'))$('ai-feedback').innerHTML='';aiPreviewRefresh();return}if(e.target.closest('#ai-save')){aiSave();return}if(e.target.closest('#bulk-add')){bulkAdd();return}if(e.target.closest('#sync-copy')){syncCopy();return}if(e.target.closest('#sync-merge')){syncMerge();return}if(e.target.closest('#export')){exportData();return}if(e.target.closest('#importBtn')){$('importFile').click();return}if(e.target.closest('#resetProgress')){if(confirm('学習の判定と復習予定をすべて削除しますか？単語と重点設定は残ります。')){db.progress={};save();restart();render();toast('学習判定をリセットしました')}return}});
-document.addEventListener('input',e=>{if(e.target.id==='search'){search=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-paste'){aiDraft=e.target.value}if(e.target.matches('[data-ai-index][data-ai-field]')&&e.target.dataset.aiField!=='selected'){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row)row[e.target.dataset.aiField]=e.target.value}});
-document.addEventListener('change',e=>{if(e.target.id==='speechRate'){const next=Number(e.target.value);if([0.65,0.85,1].includes(next)){speechRate=next;try{localStorage.setItem(SPEECH_RATE_KEY,String(next))}catch(e){};return}}if(e.target.id==='filter'){filter=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-default-subject'){importSubject=e.target.value;if(aiCandidates.length){aiCandidates.forEach(w=>{if(!w.explicitSubject)w.subjects=[importSubject]});aiPreviewRefresh()}}if(e.target.matches('[data-ai-index][data-ai-subject]')){const w=aiCandidates[Number(e.target.dataset.aiIndex)];if(w){const selected=new Set(getSubjects(w));if(e.target.checked)selected.add(e.target.dataset.aiSubject);else selected.delete(e.target.dataset.aiSubject);if(!selected.size){e.target.checked=true;return}w.subjects=[...selected];w.selected=true;w.explicitSubject=true;aiPreviewRefresh()}}if(e.target.id==='studyModeSelect'){switchStudyContext(activeSubject,e.target.value);render()}if(e.target.id==='directionSelect'){direction=e.target.value;saveStudySession();render()}if(e.target.id==='importFile'&&e.target.files?.[0])importData(e.target.files[0]);if(e.target.id==='ai-file'&&e.target.files?.[0]){aiFile(e.target.files[0]);e.target.value=''}if(e.target.matches('[data-ai-index][data-ai-field]')){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row){if(e.target.dataset.aiField==='selected')row.selected=e.target.checked;else{row[e.target.dataset.aiField]=e.target.value;const m=aiMeta();if(['new','linked'].includes(m.status[Number(e.target.dataset.aiIndex)]))row.selected=true}aiPreviewRefresh()}}});
+document.addEventListener('click',e=>{const pronunciation=e.target.closest('[data-speak-word],[data-speak-example]');if(pronunciation){e.preventDefault();e.stopPropagation();const key=pronunciation.dataset.speakWord||pronunciation.dataset.speakExample;const entry=db.words.find(w=>w.id===key);if(entry)speakEnglish(pronunciation.hasAttribute('data-speak-example')?entry.example:entry.term);return}const quick=e.target.closest('[data-quick]');if(quick){
+  const kind=quick.dataset.quick;
+  switchStudyContext(activeSubject,kind);
+  restart();
+  render(false);$('flashcard')?.scrollIntoView({block:'center'});return
+ }if(e.target.closest('#resume-study')){tab='study';render(false);$('flashcard')?.scrollIntoView({block:'center'});return}const subjectButton=e.target.closest('[data-subject]');if(subjectButton){switchStudyContext(subjectButton.dataset.subject,mode);importSubject=activeSubject==='ALL'?'FAR':activeSubject;render(false);return}const nav=e.target.closest('[data-nav]');if(nav){saveStudySession();tab=nav.dataset.nav;editingId=null;render(false);window.scrollTo(0,0);return}const modeBtn=e.target.closest('[data-mode]');if(modeBtn){switchStudyContext(activeSubject,modeBtn.dataset.mode);render();return}const dirBtn=e.target.closest('[data-direction]');if(dirBtn){direction=dirBtn.dataset.direction;saveStudySession();render();return}if(e.target.closest('#flashcard')||e.target.closest('#reveal')){flip();return}const rating=e.target.closest('[data-grade]');if(rating){grade(rating.dataset.grade);return}if(e.target.closest('#skip')){next();return}if(e.target.closest('#prev')){session.index=Math.max(0,session.index-1);session.flipped=false;saveStudySession();render();return}if(e.target.closest('#restart')||e.target.closest('#retry')){restart();render();return}if(e.target.closest('#toggle-star')){const w=currentWord();if(w){w.flagged=!w.flagged;save();render();toast(w.flagged?'重点単語に追加':'重点設定を解除')}return}const star=e.target.closest('[data-star]');if(star){const w=db.words.find(x=>x.id===star.dataset.star);if(w){w.flagged=!w.flagged;save();updateLibrary()}return}const edit=e.target.closest('[data-edit]');if(edit){editingId=edit.dataset.edit;tab='add';render(false);window.scrollTo(0,0);return}const del=e.target.closest('[data-delete]');if(del){const w=db.words.find(x=>x.id===del.dataset.delete);if(w?.id.startsWith('custom-')&&confirm('この単語を削除しますか？')){db.words=db.words.filter(x=>x.id!==w.id);delete db.progress[w.id];save();reconcileStudySession();saveStudySession();renderSubjectBar();updateLibrary()}return}if(e.target.closest('#more')){visibleLimit+=50;updateLibrary();return}if(e.target.closest('#cancel-edit')){editingId=null;render();return}if(e.target.closest('#ai-copy')){copyAI();return}if(e.target.closest('#ai-file-btn')){$('ai-file')?.click();return}if(e.target.closest('#ai-parse')){aiDraft=$('ai-paste').value;aiParse(aiDraft);return}if(e.target.closest('#ai-clear')){aiCandidates=[];aiDraft='';if($('ai-paste'))$('ai-paste').value='';if($('ai-feedback'))$('ai-feedback').innerHTML='';aiPreviewRefresh();return}if(e.target.closest('#ai-save')){aiSave();return}if(e.target.closest('#bulk-add')){bulkAdd();return}if(e.target.closest('#sync-copy')){syncCopy();return}if(e.target.closest('#sync-merge')){syncMerge();return}if(e.target.closest('#export')){exportData();return}if(e.target.closest('#importBtn')){$('importFile').click();return}if(e.target.closest('#resetProgress')){if(confirm('学習の判定と復習予定をすべて削除しますか？単語と重点設定は残ります。')){db.progress={};save();restart();render();toast('学習判定をリセットしました')}return}});
+document.addEventListener('input',e=>{if(e.target.id==='batch-source'){batchSource=e.target.value;aiPreviewRefresh()}if(e.target.id==='search'){search=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-paste'){aiDraft=e.target.value}if(e.target.matches('[data-ai-index][data-ai-field]')&&e.target.dataset.aiField!=='selected'){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row)row[e.target.dataset.aiField]=e.target.value}});
+document.addEventListener('change',e=>{if(e.target.id==='review-source'&&e.target.value){switchStudyContext(activeSubject,'source',e.target.value);tab='study';if(!currentWord())restart();render(false);return}
+ if(e.target.matches('[data-diff-row]')){
+  const i=Number(e.target.dataset.diffRow),d=aiMeta().diffs[i][Number(e.target.dataset.diffItem)],w=aiCandidates[i];
+  w.choices||={};w.choices[JSON.stringify([d.key,d.value])]=e.target.checked;w.selected=true;aiPreviewRefresh();return
+ }
+ if(e.target.id==='speechRate'){const next=Number(e.target.value);if([0.65,0.85,1].includes(next)){speechRate=next;try{localStorage.setItem(SPEECH_RATE_KEY,String(next))}catch(e){};return}}if(e.target.id==='filter'){filter=e.target.value;visibleLimit=40;updateLibrary()}if(e.target.id==='ai-default-subject'){importSubject=e.target.value;if(aiCandidates.length){aiCandidates.forEach(w=>{if(!w.explicitSubject)w.subjects=[importSubject]});aiPreviewRefresh()}}if(e.target.matches('[data-ai-index][data-ai-subject]')){const w=aiCandidates[Number(e.target.dataset.aiIndex)];if(w){const selected=new Set(getSubjects(w));if(e.target.checked)selected.add(e.target.dataset.aiSubject);else selected.delete(e.target.dataset.aiSubject);if(!selected.size){e.target.checked=true;return}w.subjects=[...selected];w.selected=true;w.explicitSubject=true;aiPreviewRefresh()}}if(e.target.id==='studyModeSelect'){switchStudyContext(activeSubject,e.target.value);render()}if(e.target.id==='directionSelect'){direction=e.target.value;saveStudySession();render()}if(e.target.id==='importFile'&&e.target.files?.[0])importData(e.target.files[0]);if(e.target.id==='ai-file'&&e.target.files?.[0]){aiFile(e.target.files[0]);e.target.value=''}if(e.target.matches('[data-ai-index][data-ai-field]')){const row=aiCandidates[Number(e.target.dataset.aiIndex)];if(row){if(e.target.dataset.aiField==='selected')row.selected=e.target.checked;else{row[e.target.dataset.aiField]=e.target.value;const m=aiMeta();if(['new','linked'].includes(m.status[Number(e.target.dataset.aiIndex)]))row.selected=true}aiPreviewRefresh()}}});
 document.addEventListener('submit',e=>{if(e.target.id==='wordform')wordSave(e)});
 document.addEventListener('keydown',e=>{if(e.target.id==='flashcard'&&(e.key==='Enter'||e.key===' ')){e.preventDefault();flip()}});
 window.addEventListener('pagehide',saveStudySession);
